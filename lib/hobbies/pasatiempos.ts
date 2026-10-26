@@ -1,0 +1,35 @@
+/**
+ * lib/hobbies/pasatiempos.ts
+ * Mismo contenido que PASATIEMPOS en perfil.tsx (Expo).
+ */
+export const PASATIEMPOS = [
+  { id: 'musica', label: 'Musica' },
+  { id: 'cine', label: 'Cine' },
+  { id: 'viajes', label: 'Viajes' },
+  { id: 'gimnasio', label: 'Gimnasio' },
+  { id: 'lectura', label: 'Lectura' },
+  { id: 'cocina', label: 'Cocina' },
+  { id: 'mascotas', label: 'Mascotas' },
+  { id: 'noche', label: 'Vida nocturna' },
+  { id: 'deportes', label: 'Deportes' },
+  { id: 'foto', label: 'Fotografia' },
+  { id: 'yoga', label: 'Yoga' },
+  { id: 'teatro', label: 'Teatro' },
+  { id: 'gastronomia', label: 'Gastronomia' },
+  { id: 'arte', label: 'Arte' },
+  { id: 'gaming', label: 'Videojuegos' },
+  { id: 'moda', label: 'Moda' },
+  { id: 'naturaleza', label: 'Naturaleza' },
+  { id: 'tecnologia', label: 'Tecnologia' },
+  { id: 'otros', label: 'Otros' },
+  { id: 'playa', label: 'Playa' },
+  { id: 'montana', label: 'Montañismo' },
+  { id: 'bici', label: 'Ciclismo' },
+  { id: 'natacion', label: 'Natación' },
+  { id: 'baile', label: 'Baile' },
+  { id: 'series', label: 'Series' },
+  { id: 'cafe', label: 'Café' },
+  { id: 'fiestas', label: 'Fiestas' },
+  { id: 'voluntariado', label: 'Voluntariado' },
+  { id: 'idiomas', label: 'Idiomas' },
+];
