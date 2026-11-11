@@ -9,31 +9,36 @@ export const ETIQUETA_MOTIVO: Record<MotivoEmergencia, string> = {
   otro: 'Otro motivo',
 };
 
+/**
+ * Activa la alerta de emergencia. El SERVIDOR registra la hora exacta y el tiempo
+ * que quedaba de la cita en ese momento (queda guardado como respaldo para Vela),
+ * bloquea a la otra persona y le manda la notificación.
+ */
 export async function registrarEmergencia(supabase: SupabaseClient, params: {
   citaId: string;
   reportadoPor: string;
   contraparteId: string;
   motivo: MotivoEmergencia;
-}) {
-  await supabase.from('citas').update({
-    en_emergencia: true,
-    en_emergencia_por: params.reportadoPor,
-    emergencia_iniciada_en: new Date().toISOString(),
-  }).eq('id', params.citaId);
+}): Promise<{ yaActiva: boolean; restanteSegundos: number | null }> {
+  const { data, error } = await supabase.rpc('activar_emergencia', { p_cita_id: params.citaId });
 
-  await supabase.from('reportes_emergencia').insert({
-    cita_id: params.citaId,
-    reportado_por: params.reportadoPor,
-    contraparte_id: params.contraparteId,
-    motivo: params.motivo,
-  });
+  if (error || !data?.ok) {
+    console.error('No se pudo activar la alerta:', error?.message ?? data?.error);
+    throw new Error('No se pudo activar la alerta');
+  }
 
-  // Aviso a la otra persona (además del bloqueo que le aparece en pantalla).
-  await supabase.from('notificaciones').insert({
-    para_usuario_id: params.contraparteId,
-    mensaje: '🚨 La otra persona activó una alerta de emergencia en la cita. Tu app quedó bloqueada hasta que la resuelva.',
-    ruta: '/encuentro',
-  });
+  // Si ya estaba activa no se duplica el reporte.
+  if (!data.ya_activa) {
+    const { error: errorReporte } = await supabase.from('reportes_emergencia').insert({
+      cita_id: params.citaId,
+      reportado_por: params.reportadoPor,
+      contraparte_id: params.contraparteId,
+      motivo: params.motivo,
+    });
+    if (errorReporte) console.error('Error guardando el reporte de emergencia:', errorReporte.message);
+  }
+
+  return { yaActiva: !!data.ya_activa, restanteSegundos: data.restante_segundos ?? null };
 }
 
 export async function desactivarEmergencia(supabase: SupabaseClient, citaId: string) {
@@ -44,18 +49,37 @@ export async function desactivarEmergencia(supabase: SupabaseClient, citaId: str
   }).eq('id', citaId);
 }
 
-export async function avisarContactosEmergencia(supabase: SupabaseClient, usuarioId: string, mensaje: string) {
-  const { data: contactos } = await supabase
-    .from('contactos_emergencia')
-    .select('nombre, pais_dial, telefono')
-    .eq('usuario_id', usuarioId);
+/**
+ * Avisa por SMS (desde el servidor) a los contactos de emergencia de quien activó la alerta.
+ * No abre ninguna ventana. Devuelve null si no se pudo contactar al servidor.
+ */
+export async function avisarContactosPorSms(
+  supabase: SupabaseClient,
+  citaId: string,
+): Promise<{ enviados: number; total: number } | null> {
+  try {
+    const { data: sesion } = await supabase.auth.getSession();
+    const token = sesion.session?.access_token;
+    if (!token) return null;
+    const resp = await fetch('/api/emergencia/sms-panico', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ cita_id: citaId }),
+    });
+    if (!resp.ok) return null;
+    const r = await resp.json();
+    if (r.omitido) return null;
+    return { enviados: r.enviados ?? 0, total: r.total ?? 0 };
+  } catch {
+    return null;
+  }
+}
 
-  (contactos ?? []).forEach((c) => {
-    const numero = `${c.pais_dial}${c.telefono}`.replace(/[^\d]/g, '');
-    if (!numero) return;
-    const url = `https://wa.me/${numero}?text=${encodeURIComponent(mensaje)}`;
-    window.open(url, '_blank');
-  });
-
-  return contactos?.length ?? 0;
+/**
+ * Antes abría WhatsApp por cada contacto para enviar un mensaje a mano.
+ * Ya no abre ninguna ventana: los avisos van por SMS desde el servidor.
+ * Se conserva solo para no romper a quien la importe; siempre devuelve 0.
+ */
+export async function avisarContactosEmergencia(_supabase: SupabaseClient, _usuarioId: string, _mensaje: string) {
+  return 0;
 }

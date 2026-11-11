@@ -2,17 +2,19 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import { useSession } from '@/lib/session/SessionProvider';
 import { resolverFotoUrl } from '@/lib/perfiles/resolverFoto';
 import {
   registrarEmergencia,
-  desactivarEmergencia,
-  avisarContactosEmergencia,
-  ETIQUETA_MOTIVO,
-  type MotivoEmergencia,
+  avisarContactosPorSms,
 } from '@/lib/emergencia/activarPanico';
+import { seguirConLaCita, cancelarPorEmergencia } from '@/lib/emergencia/resolverEmergencia';
 import { solicitarExtension, cancelarExtension, responderExtension } from '@/lib/citas/extension';
-import { finalizarEncuentro } from '@/lib/citas/finalizar';
+import { finalizarEncuentro, enviarCalificacion, omitirCalificacion } from '@/lib/citas/finalizar';
 import { reproducirAlerta } from '@/lib/utils/sonidoAlerta';
+import { ahoraServidor, sincronizarHoraServidor } from '@/lib/utils/horaServidor';
+import PanelCalificacion from '@/components/PanelCalificacion';
+import ModalDesactivarEmergencia from '@/components/ModalDesactivarEmergencia';
 import type { Cita } from '@/components/CitaCard';
 
 type Props = {
@@ -28,8 +30,6 @@ type OtraPersona = {
   verificado: boolean;
 };
 
-const MOTIVOS: MotivoEmergencia[] = ['fui_agredido', 'me_faltaron_respeto', 'cita_no_como_planeado', 'otro'];
-
 function formatMinutos(min: number): string {
   if (min % 60 === 0) {
     const horas = min / 60;
@@ -42,7 +42,20 @@ function pad(n: number): string {
   return String(n).padStart(2, '0');
 }
 
-function useCuentaRegresiva(objetivoISO: string | null) {
+function formatoReloj(totalSegundos: number): string {
+  const total = Math.max(0, Math.floor(totalSegundos));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+
+/**
+ * Cuenta regresiva medida con la hora del SERVIDOR (así las dos personas ven el mismo tiempo,
+ * aunque sus celulares tengan la hora distinta). Si hay una alerta activa, el conteo se detiene
+ * y muestra el tiempo que quedaba en el momento de la alerta.
+ */
+function useCuentaRegresiva(objetivoISO: string | null, congelado: boolean, segundosCongelados: number | null) {
   const [restante, setRestante] = useState('--:--:--');
   const [terminado, setTerminado] = useState(false);
   const sonoRef = useRef(false);
@@ -50,10 +63,19 @@ function useCuentaRegresiva(objetivoISO: string | null) {
   useEffect(() => {
     sonoRef.current = false;
     setTerminado(false);
+
+    if (congelado) {
+      setRestante(segundosCongelados == null ? '--:--:--' : formatoReloj(segundosCongelados));
+      return;
+    }
     if (!objetivoISO) return;
 
+    const objetivo = new Date(objetivoISO).getTime();
+    let activo = true;
+    let intervalo: ReturnType<typeof setInterval> | null = null;
+
     const tick = () => {
-      const ms = new Date(objetivoISO).getTime() - Date.now();
+      const ms = objetivo - ahoraServidor();
       if (ms <= 0) {
         setRestante('00:00:00');
         setTerminado(true);
@@ -64,30 +86,41 @@ function useCuentaRegresiva(objetivoISO: string | null) {
         return;
       }
       setTerminado(false);
-      const h = Math.floor(ms / 3_600_000);
-      const m = Math.floor((ms % 3_600_000) / 60_000);
-      const s = Math.floor((ms % 60_000) / 1000);
-      setRestante(`${pad(h)}:${pad(m)}:${pad(s)}`);
+      setRestante(formatoReloj(ms / 1000));
     };
 
-    tick();
-    const interval = setInterval(tick, 1000);
-    return () => clearInterval(interval);
-  }, [objetivoISO]);
+    // Primero se mide la diferencia con el servidor y después arranca el conteo.
+    sincronizarHoraServidor().finally(() => {
+      if (!activo) return;
+      tick();
+      intervalo = setInterval(tick, 1000);
+    });
+
+    return () => {
+      activo = false;
+      if (intervalo) clearInterval(intervalo);
+    };
+  }, [objetivoISO, congelado, segundosCongelados]);
 
   return { restante, terminado };
 }
 
 export default function EncuentroEnCurso({ cita, miId, miRol, onCambio }: Props) {
+  const { perfil } = useSession();
   const esCliente = miRol === 'cliente';
   const contraparteId = cita.cliente_id === miId ? cita.proveedora_id : cita.cliente_id;
 
   const [otra, setOtra] = useState<OtraPersona | null>(null);
   const [totalContactos, setTotalContactos] = useState<number | null>(null);
-  const [vistaPanico, setVistaPanico] = useState(false);
+  const [confirmandoPanico, setConfirmandoPanico] = useState(false);
+  const [calificando, setCalificando] = useState(false);
   const [vistaOtroExtension, setVistaOtroExtension] = useState(false);
   const [horasManual, setHorasManual] = useState('');
   const [procesando, setProcesando] = useState(false);
+  const [avisoSms, setAvisoSms] = useState('');
+  const [segundosCongelados, setSegundosCongelados] = useState<number | null>(null);
+  const [desactivando, setDesactivando] = useState(false);
+  const [errorDesactivar, setErrorDesactivar] = useState('');
 
   const finEstimado = cita.iniciada_en
     ? new Date(
@@ -95,7 +128,9 @@ export default function EncuentroEnCurso({ cita, miId, miRol, onCambio }: Props)
           (cita.duracion_horas * 60 + cita.extension_minutos_acumulados) * 60_000,
       ).toISOString()
     : null;
-  const { restante, terminado } = useCuentaRegresiva(finEstimado);
+
+  const congelado = !!cita.en_emergencia;
+  const { restante, terminado } = useCuentaRegresiva(finEstimado, congelado, segundosCongelados);
 
   const fechaBonita = new Date(cita.hora_acordada).toLocaleString('es-SV', {
     weekday: 'long',
@@ -138,34 +173,113 @@ export default function EncuentroEnCurso({ cita, miId, miRol, onCambio }: Props)
     };
   }, [contraparteId, miId]);
 
-  async function confirmarPanico(motivo: MotivoEmergencia) {
+  // Con una alerta activa, se lee el tiempo que quedaba cuando se activó (lo guardó el servidor).
+  useEffect(() => {
+    if (!cita.en_emergencia) {
+      setSegundosCongelados(null);
+      return;
+    }
+    let activo = true;
+    (async () => {
+      const { data } = await createClient()
+        .from('citas')
+        .select('emergencia_restante_segundos, emergencia_iniciada_en')
+        .eq('id', cita.id)
+        .maybeSingle();
+      if (!activo || !data) return;
+      if (data.emergencia_restante_segundos != null) {
+        setSegundosCongelados(data.emergencia_restante_segundos);
+        return;
+      }
+      // Alertas anteriores a este cambio: se calcula con la hora de inicio de la alerta.
+      if (data.emergencia_iniciada_en && finEstimado) {
+        const ms = new Date(finEstimado).getTime() - new Date(data.emergencia_iniciada_en).getTime();
+        setSegundosCongelados(Math.max(0, Math.floor(ms / 1000)));
+      }
+    })();
+    return () => {
+      activo = false;
+    };
+  }, [cita.en_emergencia, cita.id, finEstimado]);
+
+  // Un solo clic en el botón + una confirmación: la alerta sale al instante, sin abrir ninguna otra app.
+  async function enviarAlertaYa() {
     setProcesando(true);
+    setAvisoSms('');
     const supabase = createClient();
     try {
-      await registrarEmergencia(supabase, { citaId: cita.id, reportadoPor: miId, contraparteId, motivo });
-      const mensaje = `🚨 Emergencia Vela: necesito ayuda ahora. Estoy en una cita con ${cita.otraPersonaAlias} en ${cita.lugar}${cita.direccion ? ` (${cita.direccion})` : ''}, del ${fechaBonita}. Por favor contáctame o busca ayuda ya.`;
-      await avisarContactosEmergencia(supabase, miId, mensaje);
+      const { yaActiva } = await registrarEmergencia(supabase, {
+        citaId: cita.id,
+        reportadoPor: miId,
+        contraparteId,
+        motivo: 'otro',
+      });
+
+      if (!yaActiva) {
+        const r = await avisarContactosPorSms(supabase, cita.id);
+        if (r === null || (r.total > 0 && r.enviados === 0)) {
+          setAvisoSms('No se pudo enviar el SMS a tus contactos. La alerta sí quedó activada.');
+        } else if (r.total === 0) {
+          setAvisoSms('No tienes contactos de emergencia configurados, por eso no se envió ningún SMS.');
+        } else if (r.enviados === r.total) {
+          setAvisoSms(`Se avisó por SMS a ${r.enviados} ${r.enviados === 1 ? 'contacto' : 'contactos'}.`);
+        } else {
+          setAvisoSms(`Se avisó por SMS a ${r.enviados} de ${r.total} contactos.`);
+        }
+      }
     } catch (err) {
       console.error('Error activando la alerta de pánico:', err);
+      setAvisoSms('No se pudo activar la alerta. Intenta de nuevo.');
     }
     setProcesando(false);
-    setVistaPanico(false);
+    setConfirmandoPanico(false);
     onCambio();
   }
 
-  async function onDesactivarPanico() {
-    if (!window.confirm('¿Ya estás a salvo? Esto desactiva la alerta y desbloquea la app para la otra persona.')) return;
+  // Desactivar: se elige seguir o cancelar la cita, y en los dos casos se da el motivo.
+  async function resolverEmergencia(accion: 'seguir' | 'cancelar', motivo: string) {
     setProcesando(true);
-    await desactivarEmergencia(createClient(), cita.id);
+    setErrorDesactivar('');
+    const datos = { citaId: cita.id, miId, miAlias: perfil?.alias ?? 'Alguien', motivo };
+    const supabase = createClient();
+    const r = accion === 'seguir'
+      ? await seguirConLaCita(supabase, datos)
+      : await cancelarPorEmergencia(supabase, datos);
     setProcesando(false);
+    if (!r.ok) {
+      setErrorDesactivar(r.error);
+      return;
+    }
+    setDesactivando(false);
+    setAvisoSms('');
     onCambio();
   }
 
-  async function onFinalizar() {
-    if (!window.confirm('¿Marcar este encuentro como finalizado?')) return;
+  // Finalizar: el encuentro NO se cierra hasta que la persona califique o decida cerrar sin calificar.
+  async function finalizarYCalificar(estrellas: number, chips: string[]) {
     setProcesando(true);
-    await finalizarEncuentro(createClient(), cita.id);
+    const supabase = createClient();
+    await finalizarEncuentro(supabase, cita.id);
+    await enviarCalificacion(supabase, {
+      citaId: cita.id,
+      calificadoPor: miId,
+      calificadoA: contraparteId,
+      estrellas,
+      chips,
+      soyCliente: esCliente,
+    });
     setProcesando(false);
+    setCalificando(false);
+    onCambio();
+  }
+
+  async function finalizarSinCalificar() {
+    setProcesando(true);
+    const supabase = createClient();
+    await finalizarEncuentro(supabase, cita.id);
+    await omitirCalificacion(supabase, cita.id, esCliente);
+    setProcesando(false);
+    setCalificando(false);
     onCambio();
   }
 
@@ -236,13 +350,34 @@ export default function EncuentroEnCurso({ cita, miId, miRol, onCambio }: Props)
       </div>
 
       {/* Tiempo restante */}
-      <div className={`rounded-3xl border p-6 text-center ${terminado ? 'border-amber-500/50 bg-amber-500/10' : 'border-vela-line bg-vela-surface'}`}>
+      <div
+        className={`rounded-3xl border p-6 text-center ${
+          congelado
+            ? 'border-red-500/60 bg-red-500/10'
+            : terminado
+              ? 'border-amber-500/50 bg-amber-500/10'
+              : 'border-vela-line bg-vela-surface'
+        }`}
+      >
         <p className="text-xs font-bold uppercase tracking-wide text-vela-text-faint">
-          {terminado ? 'El tiempo acordado se cumplió' : 'Tiempo restante'}
+          {congelado
+            ? 'Alerta activada · tiempo detenido'
+            : terminado
+              ? 'El tiempo acordado se cumplió'
+              : 'Tiempo restante'}
         </p>
-        <p className={`mt-1 text-5xl font-extrabold tabular-nums ${terminado ? 'text-amber-500' : 'text-vela-text'}`}>
+        <p
+          className={`mt-1 text-5xl font-extrabold tabular-nums ${
+            congelado ? 'text-red-500' : terminado ? 'text-amber-500' : 'text-vela-text'
+          }`}
+        >
           {restante}
         </p>
+        {congelado && (
+          <p className="mt-1 text-xs text-vela-text-faint">
+            Este es el tiempo que quedaba cuando se activó la alerta. Vela lo guarda como respaldo.
+          </p>
+        )}
         {cita.extension_minutos_acumulados > 0 && (
           <p className="mt-1 text-xs text-vela-text-faint">
             Incluye +{formatMinutos(cita.extension_minutos_acumulados)} de extensión
@@ -345,10 +480,10 @@ export default function EncuentroEnCurso({ cita, miId, miRol, onCambio }: Props)
         </div>
       )}
 
-      {/* Botón de pánico */}
-      {!vistaPanico ? (
+      {/* Botón de pánico: un clic + confirmación y la alerta sale al instante */}
+      {!confirmandoPanico ? (
         <button
-          onClick={() => setVistaPanico(true)}
+          onClick={() => setConfirmandoPanico(true)}
           disabled={cita.en_emergencia}
           className="w-full h-14 rounded-full bg-red-600 text-base font-extrabold text-white disabled:opacity-60"
         >
@@ -356,34 +491,34 @@ export default function EncuentroEnCurso({ cita, miId, miRol, onCambio }: Props)
         </button>
       ) : (
         <div className="rounded-3xl border border-red-500 bg-red-500/5 p-4">
-          <p className="mb-3 text-center text-sm font-bold text-red-400">
-            ¿Qué está pasando? Toca una opción para avisar a tus contactos ya mismo:
+          <p className="mb-1 text-center text-base font-extrabold text-red-400">¿Enviar la alerta ahora?</p>
+          <p className="mb-3 text-center text-sm text-vela-text-dim">
+            Se avisará de inmediato a tus contactos de emergencia por SMS.
           </p>
           <div className="grid grid-cols-1 gap-2">
-            {MOTIVOS.map((m) => (
-              <button
-                key={m}
-                onClick={() => confirmarPanico(m)}
-                disabled={procesando}
-                className="w-full h-12 rounded-full bg-red-600 text-sm font-bold text-white disabled:opacity-60"
-              >
-                {ETIQUETA_MOTIVO[m]}
-              </button>
-            ))}
+            <button
+              onClick={enviarAlertaYa}
+              disabled={procesando}
+              className="w-full h-14 rounded-full bg-red-600 text-base font-extrabold text-white disabled:opacity-60"
+            >
+              {procesando ? 'Enviando alerta...' : 'Sí, enviar alerta'}
+            </button>
+            <button
+              onClick={() => setConfirmandoPanico(false)}
+              disabled={procesando}
+              className="w-full min-h-11 text-center text-sm text-vela-text-faint underline"
+            >
+              No, cancelar
+            </button>
           </div>
-          <button
-            onClick={() => setVistaPanico(false)}
-            disabled={procesando}
-            className="mt-2 w-full min-h-11 text-center text-sm text-vela-text-faint underline"
-          >
-            Cancelar
-          </button>
         </div>
       )}
 
+      {avisoSms && <p className="text-center text-sm text-vela-text-dim">{avisoSms}</p>}
+
       {cita.en_emergencia && cita.en_emergencia_por === miId && (
         <button
-          onClick={onDesactivarPanico}
+          onClick={() => { setErrorDesactivar(''); setDesactivando(true); }}
           disabled={procesando}
           className="w-full h-12 rounded-full border border-red-500 text-sm font-bold text-red-500 disabled:opacity-50"
         >
@@ -391,9 +526,9 @@ export default function EncuentroEnCurso({ cita, miId, miRol, onCambio }: Props)
         </button>
       )}
 
-      {/* Marcar como finalizado */}
+      {/* Marcar como finalizado → abre de una la ventana de calificación */}
       <button
-        onClick={onFinalizar}
+        onClick={() => setCalificando(true)}
         disabled={procesando}
         className="w-full h-14 rounded-full border border-vela-line bg-vela-surface text-base font-bold text-vela-text disabled:opacity-50"
       >
@@ -432,6 +567,27 @@ export default function EncuentroEnCurso({ cita, miId, miRol, onCambio }: Props)
           </li>
         </ul>
       </div>
+
+      {calificando && (
+        <PanelCalificacion
+          alias={cita.otraPersonaAlias}
+          procesando={procesando}
+          onEnviar={finalizarYCalificar}
+          onOmitir={finalizarSinCalificar}
+          onVolver={() => setCalificando(false)}
+        />
+      )}
+
+      {desactivando && (
+        <ModalDesactivarEmergencia
+          aliasOtra={cita.otraPersonaAlias}
+          procesando={procesando}
+          error={errorDesactivar}
+          onSeguir={(m) => resolverEmergencia('seguir', m)}
+          onCancelarCita={(m) => resolverEmergencia('cancelar', m)}
+          onVolver={() => { if (!procesando) setDesactivando(false); }}
+        />
+      )}
     </div>
   );
 }

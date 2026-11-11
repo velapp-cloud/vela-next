@@ -2,18 +2,19 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import { useSession } from '@/lib/session/SessionProvider';
 import { ESTADO_ACTIVA, ESTADO_CANCELADA, ESTADO_FINALIZADA } from '@/lib/citas/estados';
 import {
   registrarEmergencia,
-  desactivarEmergencia,
-  avisarContactosEmergencia,
-  ETIQUETA_MOTIVO,
-  type MotivoEmergencia,
+  avisarContactosPorSms,
 } from '@/lib/emergencia/activarPanico';
+import { seguirConLaCita, cancelarPorEmergencia } from '@/lib/emergencia/resolverEmergencia';
 import { solicitarExtension, cancelarExtension, responderExtension } from '@/lib/citas/extension';
 import { finalizarEncuentro, enviarCalificacion, omitirCalificacion } from '@/lib/citas/finalizar';
-import { CHIPS_POSITIVOS, CHIPS_NEGATIVOS } from '@/lib/calificaciones/chipsCalificacion';
 import { reproducirAlerta } from '@/lib/utils/sonidoAlerta';
+import { ahoraServidor, sincronizarHoraServidor } from '@/lib/utils/horaServidor';
+import PanelCalificacion from '@/components/PanelCalificacion';
+import ModalDesactivarEmergencia from '@/components/ModalDesactivarEmergencia';
 import { IconoEncuentros, IconoDuracion, IconoLugar, IconoUbicacion, IconoRuta } from '@/components/iconos';
 
 export type Cita = {
@@ -51,8 +52,12 @@ type Props = {
   procesando?: boolean;
 };
 
-const ETIQUETAS_ESTRELLAS = ['', 'Muy malo', 'Malo', 'Bueno', 'Muy bueno', 'Excelente'];
-const COLOR_ESTRELLAS = ['', 'text-red-400', 'text-orange-400', 'text-amber-400', 'text-lime-400', 'text-emerald-400'];
+/** Avisos rápidos que se pueden mandar a la otra persona cuando la cita está por empezar. */
+const AVISOS_RAPIDOS: { tipo: 'tarde' | 'casi' | 'cancelar'; texto: string }[] = [
+  { tipo: 'tarde', texto: 'Voy tarde, espérame' },
+  { tipo: 'casi', texto: 'Ya casi llego' },
+  { tipo: 'cancelar', texto: 'Cambio de planes: cancela la cita, luego te contacto' },
+];
 
 function formatMinutos(min: number): string {
   if (min % 60 === 0) {
@@ -62,7 +67,19 @@ function formatMinutos(min: number): string {
   return `${min} minutos`;
 }
 
-function useCuentaRegresiva(objetivoISO: string | null) {
+function formatoRestante(totalSegundos: number): string {
+  const total = Math.max(0, Math.floor(totalSegundos));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${h}h ${m}m ${s}s`;
+}
+
+/**
+ * Cuenta regresiva medida con la hora del SERVIDOR (las dos personas ven el mismo tiempo).
+ * Con una alerta activa el conteo se detiene y muestra el tiempo que quedaba al activarla.
+ */
+function useCuentaRegresiva(objetivoISO: string | null, congelado: boolean, segundosCongelados: number | null) {
   const [restante, setRestante] = useState('');
   const [terminado, setTerminado] = useState(false);
   const sonoRef = useRef(false);
@@ -70,10 +87,19 @@ function useCuentaRegresiva(objetivoISO: string | null) {
   useEffect(() => {
     sonoRef.current = false;
     setTerminado(false);
+
+    if (congelado) {
+      setRestante(segundosCongelados == null ? '' : formatoRestante(segundosCongelados));
+      return;
+    }
     if (!objetivoISO) return;
 
-    const interval = setInterval(() => {
-      const ms = new Date(objetivoISO).getTime() - Date.now();
+    const objetivo = new Date(objetivoISO).getTime();
+    let activo = true;
+    let intervalo: ReturnType<typeof setInterval> | null = null;
+
+    const tick = () => {
+      const ms = objetivo - ahoraServidor();
       if (ms <= 0) {
         setRestante('Tiempo cumplido');
         setTerminado(true);
@@ -83,42 +109,102 @@ function useCuentaRegresiva(objetivoISO: string | null) {
         }
         return;
       }
-      const h = Math.floor(ms / 3_600_000);
-      const m = Math.floor((ms % 3_600_000) / 60_000);
-      const s = Math.floor((ms % 60_000) / 1000);
-      setRestante(`${h}h ${m}m ${s}s`);
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [objetivoISO]);
+      setTerminado(false);
+      setRestante(formatoRestante(ms / 1000));
+    };
+
+    sincronizarHoraServidor().finally(() => {
+      if (!activo) return;
+      tick();
+      intervalo = setInterval(tick, 1000);
+    });
+
+    return () => {
+      activo = false;
+      if (intervalo) clearInterval(intervalo);
+    };
+  }, [objetivoISO, congelado, segundosCongelados]);
 
   return { restante, terminado };
 }
 
 export default function CitaCard({ cita, miId, miRol, onConfirmarLlegada, onCancelar, onCambio, procesando }: Props) {
+  const { perfil } = useSession();
   const esCliente = miRol === 'cliente';
   const yaConfirme = esCliente ? cita.cliente_inicio : cita.proveedora_inicio;
   const otroYaConfirmo = esCliente ? cita.proveedora_inicio : cita.cliente_inicio;
   const activa = cita.estado_manual === ESTADO_ACTIVA;
   const cancelada = cita.estado_manual === ESTADO_CANCELADA;
   const finalizada = cita.estado_manual === ESTADO_FINALIZADA;
+  const pendiente = !activa && !cancelada && !finalizada;
   const yaCalifique = esCliente ? cita.cliente_califico : cita.proveedora_califico;
   const contraparteId = miId === cita.cliente_id ? cita.proveedora_id : cita.cliente_id;
 
-  const [vistaPanico, setVistaPanico] = useState(false);
+  const [confirmandoPanico, setConfirmandoPanico] = useState(false);
   const [vistaOtroExtension, setVistaOtroExtension] = useState(false);
   const [horasManual, setHorasManual] = useState('');
   const [procesandoAccion, setProcesandoAccion] = useState(false);
-  const [estrellas, setEstrellas] = useState(0);
-  const [chipsSeleccionados, setChipsSeleccionados] = useState<string[]>([]);
+  const [avisoSms, setAvisoSms] = useState('');
+  const [segundosCongelados, setSegundosCongelados] = useState<number | null>(null);
+  const [desactivando, setDesactivando] = useState(false);
+  const [errorDesactivar, setErrorDesactivar] = useState('');
 
-  const hayPositivos = chipsSeleccionados.some((c) => (CHIPS_POSITIVOS as readonly string[]).includes(c));
-  const hayNegativos = chipsSeleccionados.some((c) => (CHIPS_NEGATIVOS as readonly string[]).includes(c));
+  // Aviso de "tu cita está por empezar" + avisos rápidos
+  const [ahoraMs, setAhoraMs] = useState(() => Date.now());
+  const [enviandoAviso, setEnviandoAviso] = useState<string | null>(null);
+  const [avisosEnviados, setAvisosEnviados] = useState<string[]>([]);
+  const [errorAviso, setErrorAviso] = useState('');
 
   const finEstimado =
     activa && cita.iniciada_en
       ? new Date(new Date(cita.iniciada_en).getTime() + (cita.duracion_horas * 60 + cita.extension_minutos_acumulados) * 60_000).toISOString()
       : null;
-  const { restante, terminado } = useCuentaRegresiva(finEstimado);
+  const congelado = activa && !!cita.en_emergencia;
+  const { restante, terminado } = useCuentaRegresiva(finEstimado, congelado, segundosCongelados);
+
+  // Reloj (hora del servidor) mientras la cita está pendiente de iniciar.
+  useEffect(() => {
+    if (!pendiente) return;
+    let activo = true;
+    sincronizarHoraServidor().finally(() => { if (activo) setAhoraMs(ahoraServidor()); });
+    const t = setInterval(() => setAhoraMs(ahoraServidor()), 15_000);
+    return () => {
+      activo = false;
+      clearInterval(t);
+    };
+  }, [pendiente]);
+
+  const minutosFaltan = Math.ceil((new Date(cita.hora_acordada).getTime() - ahoraMs) / 60_000);
+  // Desde 15 minutos antes y hasta 30 minutos después de la hora acordada.
+  const mostrarAvisoInicio = pendiente && minutosFaltan <= 15 && minutosFaltan >= -30;
+
+  // Con alerta activa: tiempo que quedaba cuando se activó (lo guardó el servidor).
+  useEffect(() => {
+    if (!cita.en_emergencia) {
+      setSegundosCongelados(null);
+      return;
+    }
+    let activo = true;
+    (async () => {
+      const { data } = await createClient()
+        .from('citas')
+        .select('emergencia_restante_segundos, emergencia_iniciada_en')
+        .eq('id', cita.id)
+        .maybeSingle();
+      if (!activo || !data) return;
+      if (data.emergencia_restante_segundos != null) {
+        setSegundosCongelados(data.emergencia_restante_segundos);
+        return;
+      }
+      if (data.emergencia_iniciada_en && finEstimado) {
+        const ms = new Date(finEstimado).getTime() - new Date(data.emergencia_iniciada_en).getTime();
+        setSegundosCongelados(Math.max(0, Math.floor(ms / 1000)));
+      }
+    })();
+    return () => {
+      activo = false;
+    };
+  }, [cita.en_emergencia, cita.id, finEstimado]);
 
   const fechaBonita = new Date(cita.hora_acordada).toLocaleString('es-SV', {
     weekday: 'long',
@@ -129,24 +215,69 @@ export default function CitaCard({ cita, miId, miRol, onConfirmarLlegada, onCanc
     hour12: true,
   });
 
-  async function confirmarPanico(motivo: MotivoEmergencia) {
+  async function enviarAviso(tipo: 'tarde' | 'casi' | 'cancelar') {
+    if (enviandoAviso) return;
+    setEnviandoAviso(tipo);
+    setErrorAviso('');
+    const { data, error } = await createClient().rpc('avisar_cita', { p_cita_id: cita.id, p_tipo: tipo });
+    if (error || !data?.ok) {
+      setErrorAviso('No se pudo enviar el aviso. Intenta de nuevo.');
+    } else {
+      setAvisosEnviados((prev) => (prev.includes(tipo) ? prev : [...prev, tipo]));
+    }
+    setEnviandoAviso(null);
+  }
+
+  // Un solo clic en el botón + una confirmación: la alerta sale al instante, sin abrir ninguna otra app.
+  async function enviarAlertaYa() {
     setProcesandoAccion(true);
+    setAvisoSms('');
     const supabase = createClient();
-    await registrarEmergencia(supabase, { citaId: cita.id, reportadoPor: miId, contraparteId, motivo });
+    try {
+      const { yaActiva } = await registrarEmergencia(supabase, {
+        citaId: cita.id,
+        reportadoPor: miId,
+        contraparteId,
+        motivo: 'otro',
+      });
 
-    const mensaje = `🚨 Emergencia Vela: necesito ayuda ahora. Estoy en una cita con ${cita.otraPersonaAlias} en ${cita.lugar}${cita.direccion ? ` (${cita.direccion})` : ''}, del ${fechaBonita}. Por favor contáctame o busca ayuda ya.`;
-    await avisarContactosEmergencia(supabase, miId, mensaje);
-
+      if (!yaActiva) {
+        const r = await avisarContactosPorSms(supabase, cita.id);
+        if (r === null || (r.total > 0 && r.enviados === 0)) {
+          setAvisoSms('No se pudo enviar el SMS a tus contactos. La alerta sí quedó activada.');
+        } else if (r.total === 0) {
+          setAvisoSms('No tienes contactos de emergencia configurados, por eso no se envió ningún SMS.');
+        } else if (r.enviados === r.total) {
+          setAvisoSms(`Se avisó por SMS a ${r.enviados} ${r.enviados === 1 ? 'contacto' : 'contactos'}.`);
+        } else {
+          setAvisoSms(`Se avisó por SMS a ${r.enviados} de ${r.total} contactos.`);
+        }
+      }
+    } catch (err) {
+      console.error('Error activando la alerta de pánico:', err);
+      setAvisoSms('No se pudo activar la alerta. Intenta de nuevo.');
+    }
     setProcesandoAccion(false);
-    setVistaPanico(false);
+    setConfirmandoPanico(false);
     onCambio();
   }
 
-  async function onDesactivarPanico() {
-    if (!window.confirm('¿Ya estás a salvo? Esto desactiva la alerta y desbloquea la app para la otra persona.')) return;
+  // Desactivar: se elige seguir o cancelar la cita, y en los dos casos se da el motivo.
+  async function resolverEmergencia(accion: 'seguir' | 'cancelar', motivo: string) {
     setProcesandoAccion(true);
-    await desactivarEmergencia(createClient(), cita.id);
+    setErrorDesactivar('');
+    const datos = { citaId: cita.id, miId, miAlias: perfil?.alias ?? 'Alguien', motivo };
+    const supabase = createClient();
+    const r = accion === 'seguir'
+      ? await seguirConLaCita(supabase, datos)
+      : await cancelarPorEmergencia(supabase, datos);
     setProcesandoAccion(false);
+    if (!r.ok) {
+      setErrorDesactivar(r.error);
+      return;
+    }
+    setDesactivando(false);
+    setAvisoSms('');
     onCambio();
   }
 
@@ -184,36 +315,52 @@ export default function CitaCard({ cita, miId, miRol, onConfirmarLlegada, onCanc
     onCambio();
   }
 
-  async function onFinalizar() {
-    if (!window.confirm('¿Finalizar este encuentro?')) return;
+  // Botón "Detener / Finalizar": abre la ventana de calificación; la cita se finaliza al calificar u omitir.
+  const [calificandoAlFinalizar, setCalificandoAlFinalizar] = useState(false);
+
+  async function finalizarYCalificar(estrellas: number, chips: string[]) {
     setProcesandoAccion(true);
-    await finalizarEncuentro(createClient(), cita.id);
+    const supabase = createClient();
+    await finalizarEncuentro(supabase, cita.id);
+    await enviarCalificacion(supabase, {
+      citaId: cita.id,
+      calificadoPor: miId,
+      calificadoA: contraparteId,
+      estrellas,
+      chips,
+      soyCliente: esCliente,
+    });
     setProcesandoAccion(false);
+    setCalificandoAlFinalizar(false);
     onCambio();
   }
 
-  // Exclusividad: si ya hay chips de un grupo seleccionados, el grupo contrario queda bloqueado.
-  function toggleChip(chip: string, esPositivo: boolean) {
-    if (esPositivo && hayNegativos) return;
-    if (!esPositivo && hayPositivos) return;
-    setChipsSeleccionados((prev) => (prev.includes(chip) ? prev.filter((c) => c !== chip) : [...prev, chip]));
+  async function finalizarSinCalificar() {
+    setProcesandoAccion(true);
+    const supabase = createClient();
+    await finalizarEncuentro(supabase, cita.id);
+    await omitirCalificacion(supabase, cita.id, esCliente);
+    setProcesandoAccion(false);
+    setCalificandoAlFinalizar(false);
+    onCambio();
   }
 
-  async function onEnviarCalificacion() {
+  // Cita ya finalizada por la otra persona: me toca calificar (o cerrar sin calificar).
+  async function calificarDespues(estrellas: number, chips: string[]) {
     setProcesandoAccion(true);
     await enviarCalificacion(createClient(), {
       citaId: cita.id,
       calificadoPor: miId,
       calificadoA: contraparteId,
       estrellas,
-      chips: chipsSeleccionados,
+      chips,
       soyCliente: esCliente,
     });
     setProcesandoAccion(false);
     onCambio();
   }
 
-  async function onOmitirCalificacion() {
+  async function omitirDespues() {
     setProcesandoAccion(true);
     await omitirCalificacion(createClient(), cita.id, esCliente);
     setProcesandoAccion(false);
@@ -273,8 +420,20 @@ export default function CitaCard({ cita, miId, miRol, onConfirmarLlegada, onCanc
 
       {activa && (
         <>
-          <p className={`mt-3 rounded-2xl p-3 text-center text-base font-bold ${terminado ? 'bg-amber-500/15 text-amber-500' : 'bg-blue-500/10 text-vela-text'}`}>
-            {terminado ? 'El tiempo acordado se cumplió' : `Tiempo restante: ${restante || 'calculando...'}`}
+          <p
+            className={`mt-3 rounded-2xl p-3 text-center text-base font-bold ${
+              congelado
+                ? 'bg-red-500/10 text-red-500'
+                : terminado
+                  ? 'bg-amber-500/15 text-amber-500'
+                  : 'bg-blue-500/10 text-vela-text'
+            }`}
+          >
+            {congelado
+              ? `Alerta activada · tiempo detenido: ${restante || '...'}`
+              : terminado
+                ? 'El tiempo acordado se cumplió'
+                : `Tiempo restante: ${restante || 'calculando...'}`}
           </p>
 
           {terminado && (
@@ -356,9 +515,9 @@ export default function CitaCard({ cita, miId, miRol, onConfirmarLlegada, onCanc
             </div>
           )}
 
-          {!vistaPanico ? (
+          {!confirmandoPanico ? (
             <button
-              onClick={() => setVistaPanico(true)}
+              onClick={() => setConfirmandoPanico(true)}
               disabled={cita.en_emergencia}
               className="mt-3 w-full h-14 rounded-full bg-red-600 text-base font-extrabold text-white disabled:opacity-60"
             >
@@ -366,34 +525,34 @@ export default function CitaCard({ cita, miId, miRol, onConfirmarLlegada, onCanc
             </button>
           ) : (
             <div className="mt-3 rounded-2xl border border-red-500 bg-red-500/5 p-4">
-              <p className="text-sm font-bold text-red-400 mb-3 text-center">
-                ¿Qué está pasando? Toca una opción para avisar a tus contactos ya mismo:
+              <p className="mb-1 text-center text-base font-extrabold text-red-400">¿Enviar la alerta ahora?</p>
+              <p className="mb-3 text-center text-sm text-vela-text-dim">
+                Se avisará de inmediato a tus contactos de emergencia por SMS.
               </p>
               <div className="grid grid-cols-1 gap-2">
-                {(['fui_agredido', 'me_faltaron_respeto', 'cita_no_como_planeado', 'otro'] as MotivoEmergencia[]).map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => confirmarPanico(m)}
-                    disabled={procesandoAccion}
-                    className="w-full h-12 rounded-full bg-red-600 text-sm font-bold text-white disabled:opacity-60"
-                  >
-                    {ETIQUETA_MOTIVO[m]}
-                  </button>
-                ))}
+                <button
+                  onClick={enviarAlertaYa}
+                  disabled={procesandoAccion}
+                  className="w-full h-14 rounded-full bg-red-600 text-base font-extrabold text-white disabled:opacity-60"
+                >
+                  {procesandoAccion ? 'Enviando alerta...' : 'Sí, enviar alerta'}
+                </button>
+                <button
+                  onClick={() => setConfirmandoPanico(false)}
+                  disabled={procesandoAccion}
+                  className="w-full min-h-11 text-center text-sm text-vela-text-dim underline"
+                >
+                  No, cancelar
+                </button>
               </div>
-              <button
-                onClick={() => setVistaPanico(false)}
-                disabled={procesandoAccion}
-                className="mt-2 w-full min-h-11 text-sm text-vela-text-dim underline"
-              >
-                Cancelar
-              </button>
             </div>
           )}
 
+          {avisoSms && <p className="mt-2 text-center text-sm text-vela-text-dim">{avisoSms}</p>}
+
           {cita.en_emergencia && cita.en_emergencia_por === miId && (
             <button
-              onClick={onDesactivarPanico}
+              onClick={() => { setErrorDesactivar(''); setDesactivando(true); }}
               disabled={procesandoAccion}
               className="mt-2 w-full h-12 rounded-full border border-red-500 text-sm font-bold text-red-500 disabled:opacity-50"
             >
@@ -402,145 +561,83 @@ export default function CitaCard({ cita, miId, miRol, onConfirmarLlegada, onCanc
           )}
 
           <button
-            onClick={onFinalizar}
+            onClick={() => setCalificandoAlFinalizar(true)}
             disabled={procesandoAccion}
             className="mt-3 w-full h-12 rounded-full border border-vela-line text-sm font-bold text-vela-text-dim disabled:opacity-50"
           >
             Detener / Finalizar encuentro
           </button>
+
+          {calificandoAlFinalizar && (
+            <PanelCalificacion
+              alias={cita.otraPersonaAlias}
+              procesando={procesandoAccion}
+              onEnviar={finalizarYCalificar}
+              onOmitir={finalizarSinCalificar}
+              onVolver={() => setCalificandoAlFinalizar(false)}
+            />
+          )}
+
+          {desactivando && (
+            <ModalDesactivarEmergencia
+              aliasOtra={cita.otraPersonaAlias}
+              procesando={procesandoAccion}
+              error={errorDesactivar}
+              onSeguir={(m) => resolverEmergencia('seguir', m)}
+              onCancelarCita={(m) => resolverEmergencia('cancelar', m)}
+              onVolver={() => { if (!procesandoAccion) setDesactivando(false); }}
+            />
+          )}
         </>
       )}
 
+      {/* La otra persona ya finalizó: ventana para calificar (o cerrar sin calificar) */}
       {finalizada && !yaCalifique && (
-        <div className="mt-4 overflow-hidden rounded-3xl border border-vela-line bg-vela-surface-2">
-          {/* Encabezado */}
-          <div className="flex flex-col items-center gap-2 border-b border-vela-line bg-gradient-to-b from-amber-500/10 to-transparent px-4 pb-4 pt-5">
-            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-vela-public text-xl font-extrabold text-white shadow-lg">
-              {cita.otraPersonaAlias.charAt(0).toUpperCase()}
-            </div>
-            <p className="text-center text-base font-extrabold text-vela-text">
-              ¿Cómo te fue con {cita.otraPersonaAlias}?
-            </p>
-            <p className="text-center text-xs text-vela-text-dim">Tu opinión es anónima y ayuda a mantener Vela segura</p>
-
-            <div className="mt-1 flex justify-center gap-1.5">
-              {[1, 2, 3, 4, 5].map((n) => (
-                <button
-                  key={n}
-                  onClick={() => setEstrellas(n)}
-                  aria-label={`${n} estrellas`}
-                  className={`text-4xl leading-none transition-transform active:scale-90 ${
-                    n <= estrellas ? `${COLOR_ESTRELLAS[estrellas]} scale-110 drop-shadow` : 'text-vela-line'
-                  }`}
-                >
-                  ★
-                </button>
-              ))}
-            </div>
-            <p className={`h-4 text-sm font-extrabold ${estrellas > 0 ? COLOR_ESTRELLAS[estrellas] : 'text-vela-text-dim'}`}>
-              {estrellas > 0 ? ETIQUETAS_ESTRELLAS[estrellas] : 'Toca una estrella'}
-            </p>
-          </div>
-
-          <div className="flex flex-col gap-3 p-4">
-            {/* Lo bueno */}
-            <div
-              className={`rounded-2xl border p-4 transition-opacity ${
-                hayNegativos ? 'border-vela-line opacity-40' : 'border-emerald-500/30 bg-emerald-500/5'
-              }`}
-            >
-              <p className="mb-2 flex items-center gap-1.5 text-xs font-extrabold uppercase tracking-wide text-emerald-500">
-                <span>👍</span> Lo bueno
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {CHIPS_POSITIVOS.map((chip) => {
-                  const sel = chipsSeleccionados.includes(chip);
-                  return (
-                    <button
-                      key={chip}
-                      onClick={() => toggleChip(chip, true)}
-                      disabled={hayNegativos}
-                      className={`rounded-full border px-3.5 py-2 text-xs font-semibold transition-all ${
-                        sel
-                          ? 'border-emerald-500 bg-emerald-500 text-white shadow'
-                          : 'border-emerald-500/40 text-emerald-500 active:scale-95'
-                      } disabled:cursor-not-allowed`}
-                    >
-                      {sel && '✓ '}
-                      {chip}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Lo malo */}
-            <div
-              className={`rounded-2xl border p-4 transition-opacity ${
-                hayPositivos ? 'border-vela-line opacity-40' : 'border-red-500/30 bg-red-500/5'
-              }`}
-            >
-              <p className="mb-2 flex items-center gap-1.5 text-xs font-extrabold uppercase tracking-wide text-red-500">
-                <span>👎</span> Lo malo
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {CHIPS_NEGATIVOS.map((chip) => {
-                  const sel = chipsSeleccionados.includes(chip);
-                  return (
-                    <button
-                      key={chip}
-                      onClick={() => toggleChip(chip, false)}
-                      disabled={hayPositivos}
-                      className={`rounded-full border px-3.5 py-2 text-xs font-semibold transition-all ${
-                        sel
-                          ? 'border-red-500 bg-red-500 text-white shadow'
-                          : 'border-red-500/40 text-red-400 active:scale-95'
-                      } disabled:cursor-not-allowed`}
-                    >
-                      {sel && '✓ '}
-                      {chip}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {(hayPositivos || hayNegativos) && (
-              <div className="flex items-center justify-between gap-2 rounded-xl bg-vela-surface px-4 py-2.5">
-                <p className="text-xs text-vela-text-dim">
-                  {hayPositivos
-                    ? 'Elegiste lo bueno, así que lo malo queda bloqueado.'
-                    : 'Elegiste lo malo, así que lo bueno queda bloqueado.'}
-                </p>
-                <button
-                  onClick={() => setChipsSeleccionados([])}
-                  className="shrink-0 min-h-11 px-2 text-xs font-bold text-vela-public underline"
-                >
-                  Limpiar
-                </button>
-              </div>
-            )}
-
-            <button
-              onClick={onEnviarCalificacion}
-              disabled={procesandoAccion || estrellas === 0}
-              className="w-full h-14 rounded-full bg-vela-public text-base font-extrabold text-white shadow-lg transition-opacity disabled:opacity-40"
-            >
-              {procesandoAccion ? 'Enviando...' : 'Enviar calificación'}
-            </button>
-            <button
-              onClick={onOmitirCalificacion}
-              disabled={procesandoAccion}
-              className="w-full min-h-11 text-center text-sm font-semibold text-vela-text-dim underline disabled:opacity-50"
-            >
-              Solo finalizar sin calificar
-            </button>
-          </div>
-        </div>
+        <PanelCalificacion
+          alias={cita.otraPersonaAlias}
+          procesando={procesandoAccion}
+          onEnviar={calificarDespues}
+          onOmitir={omitirDespues}
+        />
       )}
 
-      {!cancelada && !finalizada && !activa && (
+      {pendiente && (
         <div className="mt-4 flex flex-col gap-3">
+          {/* Falta poco para la cita: avisos rápidos para la otra persona */}
+          {mostrarAvisoInicio && (
+            <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4">
+              <p className="text-center text-sm font-extrabold text-amber-500">
+                {minutosFaltan > 0
+                  ? `Tu cita con ${cita.otraPersonaAlias} empieza en ${minutosFaltan} min`
+                  : `Tu cita con ${cita.otraPersonaAlias} ya debía empezar`}
+              </p>
+              <p className="mt-1 text-center text-xs text-vela-text-dim">
+                ¿Vas con retraso o cambió algo? Avísale con un toque:
+              </p>
+              <div className="mt-3 flex flex-col gap-2">
+                {AVISOS_RAPIDOS.map((a) => {
+                  const enviado = avisosEnviados.includes(a.tipo);
+                  return (
+                    <button
+                      key={a.tipo}
+                      onClick={() => enviarAviso(a.tipo)}
+                      disabled={!!enviandoAviso || enviado}
+                      className={`min-h-12 rounded-2xl border px-4 py-2 text-sm font-semibold ${
+                        enviado
+                          ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-500'
+                          : 'border-vela-line bg-vela-surface text-vela-text'
+                      } disabled:opacity-70`}
+                    >
+                      {enviado ? '✓ Avisado: ' : enviandoAviso === a.tipo ? 'Enviando... ' : ''}
+                      {a.texto}
+                    </button>
+                  );
+                })}
+              </div>
+              {errorAviso && <p className="mt-2 text-center text-xs text-red-400">{errorAviso}</p>}
+            </div>
+          )}
+
           {!yaConfirme && otroYaConfirmo && (
             <p className="rounded-xl bg-blue-500/10 p-3 text-center text-sm font-semibold text-blue-400">
               {cita.otraPersonaAlias} ya confirmó su llegada. Confirma tú para iniciar el encuentro.

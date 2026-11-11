@@ -9,7 +9,6 @@ import GaleriaPerfil from '@/components/GaleriaPerfil';
 import { notificarMeEncanta } from '@/lib/notificaciones/meEncanta';
 import { colorAro, ETIQUETA_PLAN } from '@/lib/planes/colorPlan';
 import { ESTADO_CANCELADA, ESTADO_FINALIZADA } from '@/lib/citas/estados';
-import { IconoUbicacion, IconoEstatura, IconoRegalo, IconoHora, IconoCerrar, IconoCorazon } from '@/components/iconos';
 import Link from 'next/link';
 
 type PerfilPublico = {
@@ -232,8 +231,9 @@ function PerfilDetalleContenido({ params }: { params: Promise<{ id: string }> })
 
   async function enviarSolicitud() {
     if (!fecha || !hora || !duracion || !tipoLugar || !queBuscas || enviando || solicitudPendiente || chatVigenteId) return;
-    if (tipoLugar === 'Otro' && !direccion.trim()) {
-      setErrorEnvio('Escribe la dirección.');
+    // La dirección es obligatoria para cualquier tipo de lugar.
+    if (!direccion.trim()) {
+      setErrorEnvio('Escribe la dirección o el nombre del lugar.');
       return;
     }
     setEnviando(true);
@@ -328,12 +328,9 @@ function PerfilDetalleContenido({ params }: { params: Promise<{ id: string }> })
           >↗</button>
           <button
             onClick={toggleMeEncanta}
-            className={`w-11 h-11 rounded-full flex items-center justify-center ${meEncantaDado ? 'bg-vela-safety text-white' : 'bg-black/40 text-white'}`}
+            className={`w-11 h-11 rounded-full flex items-center justify-center text-sm ${meEncantaDado ? 'bg-vela-safety text-white' : 'bg-black/40 text-white'}`}
             title="Me encanta"
-            aria-label="Me encanta"
-          >
-            <IconoCorazon size={22} fill={meEncantaDado ? 'currentColor' : 'none'} />
-          </button>
+          >{meEncantaDado ? '❤️' : '🤍'}</button>
           {profile.plan === 'vip' && (
             <span className="text-xs font-extrabold bg-vela-amber text-black rounded-full px-3 py-1">★ VIP</span>
           )}
@@ -351,18 +348,9 @@ function PerfilDetalleContenido({ params }: { params: Promise<{ id: string }> })
           </div>
           <div className="flex items-center gap-2 mt-1">
             <span className="text-vela-amber text-sm">★ {(profile.calificacion_prom ?? 0).toFixed(1)}</span>
-            {meEncantaRecibidos > 0 && (
-              <span className="flex items-center gap-1 text-sm opacity-90">
-                <IconoCorazon size={16} fill="currentColor" /> {meEncantaRecibidos}
-              </span>
-            )}
+            {meEncantaRecibidos > 0 && <span className="text-sm opacity-90">❤️ {meEncantaRecibidos}</span>}
           </div>
-          <p className="flex items-center gap-1.5 text-sm opacity-80 mt-1">
-            <IconoUbicacion size={16} className="flex-shrink-0" />
-            <span className="truncate">{profile.ciudad || 'Sin ciudad'}</span>
-            <IconoEstatura size={16} className="ml-1.5 flex-shrink-0" />
-            <span className="flex-shrink-0">{profile.estatura || '—'}</span>
-          </p>
+          <p className="text-sm opacity-80 mt-1">📍 {profile.ciudad || 'Sin ciudad'} · 🏃 {profile.estatura || '—'}</p>
         </div>
       </div>
 
@@ -375,9 +363,7 @@ function PerfilDetalleContenido({ params }: { params: Promise<{ id: string }> })
 
         {/* Regalo resaltado: lo que le gustaría recibir */}
         <div className="rounded-3xl border-2 border-vela-amber bg-vela-amber/10 p-5 flex items-center gap-4">
-          <div className="w-14 h-14 rounded-full bg-vela-amber/20 flex items-center justify-center text-vela-amber flex-shrink-0">
-            <IconoRegalo size={30} stroke={1.75} />
-          </div>
+          <div className="w-14 h-14 rounded-full bg-vela-amber/20 flex items-center justify-center text-3xl flex-shrink-0">🎁</div>
           <div className="min-w-0">
             <p className="text-[11px] font-extrabold text-vela-amber tracking-wide">REGALO QUE LE GUSTARÍA RECIBIR</p>
             <p className="text-lg font-bold text-vela-text leading-snug break-words">{profile.regalo || 'Sin especificar'}</p>
@@ -431,9 +417,7 @@ function PerfilDetalleContenido({ params }: { params: Promise<{ id: string }> })
 
         {solicitudPendiente && !solicitudEnviada && (
           <div className="bg-vela-surface-2 border border-vela-line rounded-2xl p-5 text-center">
-            <p className="flex items-center justify-center gap-2 text-sm font-bold text-vela-text">
-              <IconoHora size={18} /> Solicitud enviada
-            </p>
+            <p className="text-sm font-bold text-vela-text">⏳ Solicitud enviada</p>
             <p className="text-xs text-vela-text-faint mt-1">Ya enviaste una solicitud a {profile.alias}. Te avisaremos cuando responda.</p>
           </div>
         )}
@@ -469,11 +453,10 @@ function PerfilDetalleContenido({ params }: { params: Promise<{ id: string }> })
             </button>
             <button
               onClick={() => setShowRechazo(true)}
-              className="w-14 h-14 rounded-full bg-vela-surface-2 border border-vela-line text-vela-text-faint flex items-center justify-center"
+              className="w-14 h-14 rounded-full bg-vela-surface-2 border border-vela-line text-vela-text-faint font-bold text-base flex items-center justify-center"
               title="No me interesa este perfil"
-              aria-label="No me interesa este perfil"
             >
-              <IconoCerrar size={22} stroke={2.4} />
+              ✕
             </button>
           </div>
         )}
@@ -577,11 +560,12 @@ function PerfilDetalleContenido({ params }: { params: Promise<{ id: string }> })
               </div>
             </div>
             <div>
-              <label className="text-xs font-semibold text-vela-text-faint">Dirección {tipoLugar === 'Otro' ? '' : '(opcional)'}</label>
+              <label className="text-xs font-semibold text-vela-text-faint">Dirección (obligatoria)</label>
               <input
                 value={direccion}
                 onChange={(e) => setDireccion(e.target.value)}
                 placeholder="Nombre o dirección del lugar"
+                required
                 className="w-full mt-1.5 bg-vela-surface-2 border border-vela-line rounded-2xl px-4 h-14 text-base text-vela-text outline-none"
               />
             </div>
@@ -607,7 +591,7 @@ function PerfilDetalleContenido({ params }: { params: Promise<{ id: string }> })
 
             <button
               onClick={enviarSolicitud}
-              disabled={!fecha || !hora || !duracion || !tipoLugar || !queBuscas || enviando}
+              disabled={!fecha || !hora || !duracion || !tipoLugar || !direccion.trim() || !queBuscas || enviando}
               className="w-full h-14 rounded-full bg-vela-public text-white font-bold text-base flex items-center justify-center gap-2 disabled:opacity-50 mt-1"
             >
               {enviando ? 'Enviando...' : 'Enviar solicitud'}

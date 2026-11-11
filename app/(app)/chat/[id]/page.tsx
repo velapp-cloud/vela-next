@@ -18,6 +18,10 @@ import { IconoEncuentros, IconoHora, IconoDuracion, IconoLugar, IconoUbicacion }
 const DURACIONES = ['30 minutos', '1 hora', '1 hora 30 min', '2 horas', '3 horas', '4 horas'];
 const MAX_REAGENDAMIENTOS = 3;
 
+// Columnas del chat que usa esta pantalla.
+const CAMPOS_CHAT =
+  'id, cliente_id, proveedora_id, ficha_fecha, ficha_hora, ficha_duracion, ficha_lugar, ficha_tipo, ficha_mensaje, intentos_reagendado, bloqueado, bloqueado_hasta, requiere_nueva_solicitud';
+
 // Texto fijo que genera pedirCambiosCita() en el mensaje de sistema.
 const MARCA_PEDIDO_CAMBIOS = 'pidió estos cambios en la cita';
 // Textos fijos de los avisos de cancelación / eliminación de perfil.
@@ -69,6 +73,7 @@ function ChatDetalleContenido({ params }: { params: Promise<{ id: string }> }) {
   const [cargando, setCargando] = useState(true);
   const [texto, setTexto] = useState('');
   const [enviando, setEnviando] = useState(false);
+  const [errorEnvio, setErrorEnvio] = useState('');
   const [editando, setEditando] = useState(false);
   const [errorGuardado, setErrorGuardado] = useState('');
   const [citaEstado, setCitaEstado] = useState<string | null>(null);
@@ -77,6 +82,8 @@ function ChatDetalleContenido({ params }: { params: Promise<{ id: string }> }) {
   const [hayBloqueo, setHayBloqueo] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const mensajesRef = useRef<HTMLDivElement>(null);
+  // Campo de escribir: se usa para que el teclado no se cierre al enviar.
+  const inputRef = useRef<HTMLInputElement>(null);
   const [mostrarSubir, setMostrarSubir] = useState(false);
 
   function onScrollMensajes(e: React.UIEvent<HTMLDivElement>) {
@@ -105,13 +112,33 @@ function ChatDetalleContenido({ params }: { params: Promise<{ id: string }> }) {
       .eq('leida', false);
   }, [chatId, perfil?.id, supabase]);
 
+  // Vuelve a leer, en silencio, si el chat y la cita siguen abiertos.
+  // Sirve cuando el aviso en tiempo real no llegó (conexión caída, pestaña dormida).
+  const refrescarEstado = useCallback(async () => {
+    const { data: fila } = await supabase
+      .from('chats')
+      .select(CAMPOS_CHAT)
+      .eq('id', chatId)
+      .maybeSingle();
+    if (fila) setChat(fila);
+
+    const { data: cita } = await supabase
+      .from('citas')
+      .select('estado_manual')
+      .eq('chat_id', chatId)
+      .order('hora_acordada', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    setCitaEstado(cita?.estado_manual ?? null);
+  }, [chatId, supabase]);
+
   const cargarTodo = useCallback(async () => {
     if (!perfil?.id) return;
     setCargando(true);
 
     const { data: chatData, error: chatError } = await supabase
       .from('chats')
-      .select('id, cliente_id, proveedora_id, ficha_fecha, ficha_hora, ficha_duracion, ficha_lugar, ficha_tipo, ficha_mensaje, intentos_reagendado, bloqueado, bloqueado_hasta, requiere_nueva_solicitud')
+      .select(CAMPOS_CHAT)
       .eq('id', chatId)
       .single();
 
@@ -295,10 +322,12 @@ function ChatDetalleContenido({ params }: { params: Promise<{ id: string }> }) {
   }, [chatId, perfil?.id, supabase, marcarNotisChatLeidas]);
 
   // Si se pierde y vuelve la conexión (o se vuelve a esta pestaña), se
-  // traen los mensajes que faltaron, en silencio y sin recargar la página.
+  // traen los mensajes que faltaron y se vuelve a leer si el chat sigue
+  // abierto, en silencio y sin recargar la página.
   useEffect(() => {
     if (!perfil?.id) return;
     async function resincronizar() {
+      await refrescarEstado();
       const { data } = await supabase
         .from('mensajes')
         .select('id, chat_id, remitente_id, texto, tipo, creado_en')
@@ -320,7 +349,7 @@ function ChatDetalleContenido({ params }: { params: Promise<{ id: string }> }) {
       window.removeEventListener('online', alVolverConexion);
       document.removeEventListener('visibilitychange', alVolverAVer);
     };
-  }, [chatId, perfil?.id, perfil?.rol, supabase, marcarNotisChatLeidas]);
+  }, [chatId, perfil?.id, perfil?.rol, supabase, marcarNotisChatLeidas, refrescarEstado]);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -329,6 +358,7 @@ function ChatDetalleContenido({ params }: { params: Promise<{ id: string }> }) {
   async function enviarMensaje() {
     if (!texto.trim() || !perfil?.id || enviando || chatCerrado) return;
     setEnviando(true);
+    setErrorEnvio('');
     const { error } = await supabase.from('mensajes').insert({
       chat_id: chatId,
       remitente_id: perfil.id,
@@ -341,9 +371,16 @@ function ChatDetalleContenido({ params }: { params: Promise<{ id: string }> }) {
     setEnviando(false);
     if (error) {
       console.error('Error enviando mensaje:', error.message);
+      // Puede que el chat se haya cerrado mientras lo tenías abierto: se vuelve
+      // a leer su estado y, si está cerrado, la pantalla se bloquea sola.
+      await refrescarEstado();
+      setErrorEnvio('No se pudo enviar el mensaje. Intenta de nuevo.');
+      inputRef.current?.focus();
       return;
     }
     setTexto('');
+    // El teclado se queda abierto para seguir escribiendo.
+    inputRef.current?.focus();
   }
 
   const bloqueadoVigente = chat?.bloqueado && chat.bloqueado_hasta && new Date(chat.bloqueado_hasta) > new Date();
@@ -394,7 +431,9 @@ function ChatDetalleContenido({ params }: { params: Promise<{ id: string }> }) {
   const nombreOtra = otraPersona?.alias ?? 'la otra persona';
 
   return (
-    <main className="flex-1 flex flex-col max-w-md mx-auto w-full h-screen">
+    // flex-1 + min-h-0: el chat ocupa solo el espacio que le toca dentro de la app,
+    // así la barra de navegación de abajo siempre se ve.
+    <main className="flex-1 min-h-0 flex flex-col max-w-md mx-auto w-full">
       <div className="flex items-center gap-3 border-b border-vela-line bg-vela-surface p-4">
         <button onClick={() => router.push('/chat')} className="w-11 h-11 -ml-2 flex items-center justify-center text-vela-text-faint text-xl">←</button>
         <div className="w-12 h-12 rounded-full overflow-hidden flex-shrink-0" style={{ backgroundColor: otraPersona?.avatar_color ?? '#D91F3A' }}>
@@ -558,21 +597,37 @@ function ChatDetalleContenido({ params }: { params: Promise<{ id: string }> }) {
           )}
         </div>
       ) : (
-        <div className="flex items-center gap-2 border-t border-vela-line bg-vela-surface p-3">
-          <input
-            value={texto}
-            onChange={(e) => setTexto(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') enviarMensaje(); }}
-            placeholder="Escribe un mensaje..."
-            className="flex-1 min-w-0 bg-vela-surface-2 border border-vela-line rounded-full px-5 h-12 text-base text-vela-text outline-none focus:border-vela-public/60"
-          />
-          <button
-            onClick={enviarMensaje}
-            disabled={!texto.trim() || enviando}
-            className="w-12 h-12 rounded-full bg-vela-public text-white flex items-center justify-center disabled:opacity-50"
-          >
-            ➤
-          </button>
+        <div className="border-t border-vela-line bg-vela-surface">
+          {errorEnvio && <p className="px-4 pt-2 text-xs text-vela-safety">{errorEnvio}</p>}
+          <div className="flex items-center gap-2 p-3">
+            <input
+              ref={inputRef}
+              value={texto}
+              onChange={(e) => { setTexto(e.target.value); if (errorEnvio) setErrorEnvio(''); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  enviarMensaje();
+                }
+              }}
+              enterKeyHint="send"
+              autoComplete="off"
+              placeholder="Escribe un mensaje..."
+              className="flex-1 min-w-0 bg-vela-surface-2 border border-vela-line rounded-full px-5 h-12 text-base text-vela-text outline-none focus:border-vela-public/60"
+            />
+            <button
+              type="button"
+              // Evita que el botón le quite el foco al campo: así el teclado no se cierra.
+              onPointerDown={(e) => e.preventDefault()}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={enviarMensaje}
+              disabled={!texto.trim() || enviando}
+              aria-label="Enviar mensaje"
+              className="w-12 h-12 rounded-full bg-vela-public text-white flex items-center justify-center disabled:opacity-50"
+            >
+              ➤
+            </button>
+          </div>
         </div>
       )}
     </main>

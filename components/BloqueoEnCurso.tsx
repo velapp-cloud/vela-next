@@ -11,6 +11,8 @@ import {
   ETIQUETA_MOTIVO,
   type MotivoEmergencia,
 } from '@/lib/emergencia/activarPanico';
+import { seguirConLaCita, cancelarPorEmergencia } from '@/lib/emergencia/resolverEmergencia';
+import ModalDesactivarEmergencia from '@/components/ModalDesactivarEmergencia';
 
 type CitaEnCurso = {
   id: string;
@@ -20,6 +22,7 @@ type CitaEnCurso = {
   direccion: string | null;
   hora_acordada: string;
   en_emergencia: boolean;
+  en_emergencia_por: string | null;
 };
 
 const MOTIVOS: MotivoEmergencia[] = ['fui_agredido', 'me_faltaron_respeto', 'cita_no_como_planeado', 'otro'];
@@ -34,12 +37,15 @@ export default function BloqueoEnCurso() {
   const [alias, setAlias] = useState('la otra persona');
   const [vistaPanico, setVistaPanico] = useState(false);
   const [enviando, setEnviando] = useState(false);
+  const [desactivando, setDesactivando] = useState(false);
+  const [procesandoDesactivar, setProcesandoDesactivar] = useState(false);
+  const [errorDesactivar, setErrorDesactivar] = useState('');
 
   const revisar = useCallback(async () => {
     if (!perfil?.id) return;
     const { data } = await supabase
       .from('citas')
-      .select('id, cliente_id, proveedora_id, lugar, direccion, hora_acordada, en_emergencia')
+      .select('id, cliente_id, proveedora_id, lugar, direccion, hora_acordada, en_emergencia, en_emergencia_por')
       .or(`cliente_id.eq.${perfil.id},proveedora_id.eq.${perfil.id}`)
       .eq('estado_manual', ESTADO_ACTIVA)
       .order('hora_acordada', { ascending: false })
@@ -58,6 +64,7 @@ export default function BloqueoEnCurso() {
       setAlias(otra?.alias ?? 'la otra persona');
     } else {
       setVistaPanico(false);
+      setDesactivando(false);
     }
   }, [perfil?.id, supabase]);
 
@@ -106,7 +113,27 @@ export default function BloqueoEnCurso() {
     revisar();
   }
 
+  async function resolver(accion: 'seguir' | 'cancelar', motivo: string) {
+    if (!cita || !perfil?.id) return;
+    setProcesandoDesactivar(true);
+    setErrorDesactivar('');
+    const datos = { citaId: cita.id, miId: perfil.id, miAlias: perfil.alias ?? 'Alguien', motivo };
+    const r = accion === 'seguir'
+      ? await seguirConLaCita(supabase, datos)
+      : await cancelarPorEmergencia(supabase, datos);
+    setProcesandoDesactivar(false);
+    if (!r.ok) {
+      setErrorDesactivar(r.error);
+      return;
+    }
+    setDesactivando(false);
+    revisar();
+  }
+
   if (!cita || pathname === '/encuentro') return null;
+
+  // Solo quien activó la alerta puede desactivarla desde aquí.
+  const puedoDesactivar = cita.en_emergencia && cita.en_emergencia_por === perfil?.id;
 
   return (
     <div className="fixed inset-0 z-[998] flex items-center justify-center bg-black/80 px-5">
@@ -129,6 +156,14 @@ export default function BloqueoEnCurso() {
             >
               {cita.en_emergencia ? '🚨 Alerta ya enviada' : '🚨 Alerta de pánico'}
             </button>
+            {puedoDesactivar && (
+              <button
+                onClick={() => { setErrorDesactivar(''); setDesactivando(true); }}
+                className="w-full h-14 rounded-full border border-red-500 text-base font-bold text-red-500"
+              >
+                Desactivar alerta
+              </button>
+            )}
             <button
               onClick={() => router.push('/encuentro')}
               className="w-full h-14 rounded-full bg-vela-public text-base font-bold text-white flex items-center justify-center gap-2"
@@ -164,6 +199,17 @@ export default function BloqueoEnCurso() {
           </div>
         )}
       </div>
+
+      {desactivando && (
+        <ModalDesactivarEmergencia
+          aliasOtra={alias}
+          procesando={procesandoDesactivar}
+          error={errorDesactivar}
+          onSeguir={(m) => resolver('seguir', m)}
+          onCancelarCita={(m) => resolver('cancelar', m)}
+          onVolver={() => { if (!procesandoDesactivar) setDesactivando(false); }}
+        />
+      )}
     </div>
   );
 }

@@ -1,12 +1,13 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import TabBar from '@/components/TabBar';
-import NotificacionesBell from '@/components/NotificacionesBell';
 import ToastNotificaciones from '@/components/ToastNotificaciones';
 import ToastMensajes from '@/components/ToastMensajes';
 import BloqueoEmergencia from '@/components/BloqueoEmergencia';
 import BloqueoEnCurso from '@/components/BloqueoEnCurso';
+import BotonSeguridadFlotante from '@/components/BotonSeguridadFlotante';
 import { PresenciaProvider } from '@/components/PresenciaProvider';
+import { AccesoPlanProvider } from '@/lib/planes/accesoPlan';
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient();
@@ -48,23 +49,24 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   return (
     <PresenciaProvider>
-      <div className="flex-1 flex flex-col md:flex-row">
-        {/* En celular este contenedor "desaparece" (contents) y todo queda como antes.
-            En computador es la columna de contenido al lado del menú lateral. */}
-        <div className="contents md:flex md:flex-1 md:flex-col md:min-w-0">
-          <div className="sticky top-0 z-40 flex justify-end px-4 pt-3 pb-2 bg-vela-bg/95 backdrop-blur">
-            <NotificacionesBell />
+      <AccesoPlanProvider>
+        {/* La pantalla se divide en dos partes que no se pisan:
+            el contenido (con su propio scroll) y la barra de navegación.
+            En celular la barra queda abajo; en computador, como menú lateral a la izquierda.
+            La barra va primero en el código a propósito: así cualquier ventana emergente
+            (fotos, perfiles, filtros) siempre se pinta POR ENCIMA de ella. */}
+        <div className="flex h-dvh flex-col overflow-hidden md:flex-row">
+          <TabBar />
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            <BloqueoEmergencia />
+            <BloqueoEnCurso />
+            <ToastNotificaciones />
+            <ToastMensajes />
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</div>
+            <BotonSeguridadFlotante />
           </div>
-          {/* Los bloqueos van FUERA del header: el backdrop-blur del header
-              atrapa a los elementos "fixed" y los dejaba encerrados ahí. */}
-          <BloqueoEmergencia />
-          <BloqueoEnCurso />
-          <ToastNotificaciones />
-          <ToastMensajes />
-          <div className="flex-1 flex flex-col overflow-y-auto">{children}</div>
         </div>
-        <TabBar />
-      </div>
+      </AccesoPlanProvider>
     </PresenciaProvider>
   );
 }

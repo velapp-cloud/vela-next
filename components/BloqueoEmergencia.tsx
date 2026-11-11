@@ -6,10 +6,12 @@ import { useSession } from '@/lib/session/SessionProvider';
 import { ESTADO_CANCELADA, ESTADO_FINALIZADA } from '@/lib/citas/estados';
 import { desactivarEmergencia, avisarContactosEmergencia } from '@/lib/emergencia/activarPanico';
 import { iniciarAlarma } from '@/lib/emergencia/alarma';
-import { VELA_WHATSAPP, VELA_CORREO } from '@/lib/emergencia/contactoVela';
+import { VELA_WHATSAPP } from '@/lib/emergencia/contactoVela';
+import { ahoraServidor, sincronizarHoraServidor } from '@/lib/utils/horaServidor';
 
-/** Minutos que debe durar la alerta sin resolverse para ofrecer contactar a Vela. */
+/** Tiempo prudente (en minutos) para que la persona bloqueada escriba a Vela. */
 const MINUTOS_PARA_CONTACTO = 10;
+const SEGUNDOS_PARA_CONTACTO = MINUTOS_PARA_CONTACTO * 60;
 
 type Alerta = {
   citaId: string;
@@ -23,6 +25,11 @@ type Alerta = {
   desde: number;
 };
 
+function mmss(totalSegundos: number): string {
+  const t = Math.max(0, Math.floor(totalSegundos));
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+}
+
 export default function BloqueoEmergencia() {
   const { perfil } = useSession();
   const supabase = createClient();
@@ -32,6 +39,14 @@ export default function BloqueoEmergencia() {
   const [despues, setDespues] = useState(false);
   const [citaDespues, setCitaDespues] = useState<string | null>(null);
   const [avisados, setAvisados] = useState<number | null>(null);
+
+  // Mensaje a Vela
+  const [modalAbierto, setModalAbierto] = useState(false);
+  const [mensaje, setMensaje] = useState('');
+  const [enviando, setEnviando] = useState(false);
+  const [errorEnvio, setErrorEnvio] = useState('');
+  const [enviado, setEnviado] = useState(false);
+
   const vistoPrimeraVez = useRef<Record<string, number>>({});
   const alarmaRef = useRef<ReturnType<typeof iniciarAlarma> | null>(null);
 
@@ -85,20 +100,52 @@ export default function BloqueoEmergencia() {
     revisar();
   }, [revisar]);
 
+  // Solo las citas donde participo (antes se escuchaban las citas de todos).
   useEffect(() => {
     if (!perfil?.id) return;
     const canal = supabase
       .channel(`bloqueo-emergencia-${perfil.id}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'citas' }, () => revisar())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'citas', filter: `cliente_id=eq.${perfil.id}` }, () => revisar())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'citas', filter: `proveedora_id=eq.${perfil.id}` }, () => revisar())
       .subscribe();
-    return () => { supabase.removeChannel(canal); };
+
+    const alVolver = () => { revisar(); };
+    const alVer = () => { if (document.visibilityState === 'visible') revisar(); };
+    window.addEventListener('online', alVolver);
+    document.addEventListener('visibilitychange', alVer);
+    // Respaldo por si el tiempo real no avisa (por ejemplo, si se borra una cita).
+    const respaldo = setInterval(() => {
+      if (document.visibilityState === 'visible' && navigator.onLine) revisar();
+    }, 30_000);
+
+    return () => {
+      supabase.removeChannel(canal);
+      window.removeEventListener('online', alVolver);
+      document.removeEventListener('visibilitychange', alVer);
+      clearInterval(respaldo);
+    };
   }, [perfil?.id, supabase, revisar]);
 
-  // Reloj para saber cuándo mostrar la opción de contactar a Vela.
+  // Cronómetro del tiempo para contactar a Vela (hora del servidor, avanza cada segundo).
   useEffect(() => {
     if (!alerta) return;
-    const t = setInterval(() => setAhora(Date.now()), 15_000);
-    return () => clearInterval(t);
+    let activo = true;
+    sincronizarHoraServidor().finally(() => { if (activo) setAhora(ahoraServidor()); });
+    const t = setInterval(() => setAhora(ahoraServidor()), 1000);
+    return () => {
+      activo = false;
+      clearInterval(t);
+    };
+  }, [alerta]);
+
+  // Al desaparecer la alerta se limpia el mensaje.
+  useEffect(() => {
+    if (!alerta) {
+      setModalAbierto(false);
+      setMensaje('');
+      setErrorEnvio('');
+      setEnviado(false);
+    }
   }, [alerta]);
 
   // Alarma en bucle solo para la persona protegida (Gold/VIP) en una alerta automática.
@@ -160,6 +207,36 @@ export default function BloqueoEmergencia() {
     setAvisados(n);
   }
 
+  async function enviarMensajeAVela() {
+    if (!alerta || enviando) return;
+    const texto = mensaje.trim();
+    if (texto.length < 10) {
+      setErrorEnvio('Cuéntanos un poco más (mínimo 10 caracteres).');
+      return;
+    }
+    setEnviando(true);
+    setErrorEnvio('');
+    try {
+      const { data: sesion } = await supabase.auth.getSession();
+      const token = sesion.session?.access_token;
+      const resp = await fetch('/api/emergencia/contactar-vela', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
+        body: JSON.stringify({ cita_id: alerta.citaId, motivo: texto }),
+      });
+      const r = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        setErrorEnvio(r?.error ?? 'No se pudo enviar tu mensaje. Intenta de nuevo.');
+      } else {
+        setEnviado(true);
+        setMensaje('');
+      }
+    } catch {
+      setErrorEnvio('Sin conexión. Revisa tu internet e intenta de nuevo.');
+    }
+    setEnviando(false);
+  }
+
   if (!alerta) {
     if (!despues) return null;
     return (
@@ -195,15 +272,15 @@ export default function BloqueoEmergencia() {
     );
   }
 
-  const minutos = Math.max(0, Math.floor((ahora - alerta.desde) / 60_000));
-  const mostrarContacto = minutos >= MINUTOS_PARA_CONTACTO;
-  const hayContacto = !!VELA_WHATSAPP || !!VELA_CORREO;
+  const transcurrido = Math.max(0, Math.floor((ahora - alerta.desde) / 1000));
+  const restanteContacto = SEGUNDOS_PARA_CONTACTO - transcurrido;
+  const tiempoAgotado = restanteContacto <= 0;
   const textoContacto = encodeURIComponent('Hola Vela, hay una alerta de emergencia activa en mi cuenta y necesito ayuda.');
   const puedeResolver = (alerta.auto && alerta.protegido) || alerta.heredada;
 
   return (
     <div
-      className="fixed inset-0 z-[999] bg-black/95 flex flex-col items-center justify-center px-6 text-center"
+      className="fixed inset-0 z-[999] bg-black/95 flex flex-col items-center justify-center px-6 text-center overflow-y-auto py-8"
       role="alertdialog"
       aria-modal="true"
       onPointerDown={() => alarmaRef.current?.desbloquear()}
@@ -244,37 +321,97 @@ export default function BloqueoEmergencia() {
         </button>
       )}
 
-      {mostrarContacto ? (
-        <div className="flex flex-col gap-3 w-full max-w-xs">
-          <p className="text-sm text-white/70 mb-1">
-            La alerta lleva {minutos} minutos sin resolverse. Si necesitas ayuda, comunícate con Vela.
-          </p>
-          {VELA_WHATSAPP && (
-            <a
-              href={`https://wa.me/${VELA_WHATSAPP}?text=${textoContacto}`}
-              target="_blank"
-              rel="noreferrer"
-              className="h-14 px-6 rounded-full bg-red-600 text-white font-bold text-base flex items-center justify-center"
-            >
-              Comunicarme con Vela por WhatsApp
-            </a>
-          )}
-          {VELA_CORREO && (
-            <a
-              href={`mailto:${VELA_CORREO}?subject=${encodeURIComponent('Alerta de emergencia')}&body=${textoContacto}`}
-              className="h-14 px-6 rounded-full border border-red-500 text-red-400 font-bold text-base flex items-center justify-center"
-            >
-              Comunicarme con Vela por correo
-            </a>
-          )}
-          {!hayContacto && (
-            <p className="text-xs text-white/60">Contacto de Vela sin configurar (lib/emergencia/contactoVela.ts).</p>
-          )}
-        </div>
-      ) : (
-        <p className="text-xs text-white/50 max-w-xs">
-          Si la alerta no se resuelve en unos minutos, aquí aparecerá la opción de comunicarte con Vela.
+      {/* Cronómetro para comunicarse con Vela */}
+      <div className="flex flex-col items-center gap-3 w-full max-w-xs rounded-3xl border border-white/15 bg-white/5 p-5">
+        <p className="text-xs font-bold uppercase tracking-wide text-white/60">
+          {tiempoAgotado ? 'El tiempo sugerido terminó' : 'Tiempo para comunicarte con Vela'}
         </p>
+        <p className={`text-5xl font-extrabold tabular-nums ${tiempoAgotado ? 'text-amber-400' : 'text-white'}`}>
+          {mmss(Math.max(0, restanteContacto))}
+        </p>
+        <p className="text-sm text-white/70 leading-relaxed">
+          {tiempoAgotado
+            ? 'Aún puedes escribirnos. Cuéntanos qué pasó para que Vela revise tu cuenta.'
+            : 'Explícale a Vela por qué tu cuenta quedó bloqueada. Revisaremos tu caso.'}
+        </p>
+        <button
+          onClick={() => { setEnviado(false); setErrorEnvio(''); setModalAbierto(true); }}
+          className="h-14 w-full rounded-full bg-red-600 text-white font-bold text-base"
+        >
+          Escribir a Vela
+        </button>
+        {VELA_WHATSAPP && tiempoAgotado && (
+          <a
+            href={`https://wa.me/${VELA_WHATSAPP}?text=${textoContacto}`}
+            target="_blank"
+            rel="noreferrer"
+            className="h-12 w-full rounded-full border border-red-500 text-red-400 font-bold text-sm flex items-center justify-center"
+          >
+            También por WhatsApp
+          </a>
+        )}
+      </div>
+
+      {/* Ventana para escribir el mensaje */}
+      {modalAbierto && (
+        <div
+          className="fixed inset-0 z-[1000] bg-black/80 flex items-end sm:items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Escribir a Vela"
+        >
+          <div className="w-full max-w-md rounded-3xl bg-vela-surface border border-vela-line p-5 text-left">
+            {enviado ? (
+              <div className="flex flex-col items-center gap-3 py-4 text-center">
+                <p className="text-5xl">📨</p>
+                <h3 className="text-xl font-extrabold text-vela-text">Mensaje enviado</h3>
+                <p className="text-sm text-vela-text-dim leading-relaxed">
+                  Vela recibió tu mensaje y revisará tu caso. Esta pantalla se cerrará sola cuando tu cuenta sea
+                  desbloqueada.
+                </p>
+                <button
+                  onClick={() => setModalAbierto(false)}
+                  className="mt-2 h-14 w-full rounded-full bg-vela-public text-white font-bold text-base"
+                >
+                  Entendido
+                </button>
+              </div>
+            ) : (
+              <>
+                <h3 className="text-xl font-extrabold text-vela-text">Escribir a Vela</h3>
+                <p className="mt-1 text-sm text-vela-text-dim">
+                  Cuéntanos qué pasó y por qué crees que tu cuenta debe desbloquearse.
+                </p>
+                <textarea
+                  value={mensaje}
+                  onChange={(e) => setMensaje(e.target.value)}
+                  maxLength={1000}
+                  rows={6}
+                  placeholder="Escribe aquí tu mensaje..."
+                  className="mt-3 w-full resize-none rounded-2xl border border-vela-line bg-vela-bg p-4 text-base text-vela-text outline-none"
+                />
+                <p className="mt-1 text-right text-xs text-vela-text-faint">{mensaje.length}/1000</p>
+                {errorEnvio && <p className="mt-1 text-sm text-red-400">{errorEnvio}</p>}
+                <div className="mt-3 flex gap-2">
+                  <button
+                    onClick={() => setModalAbierto(false)}
+                    disabled={enviando}
+                    className="flex-1 h-14 rounded-full border border-vela-line text-base font-bold text-vela-text-dim disabled:opacity-50"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={enviarMensajeAVela}
+                    disabled={enviando || mensaje.trim().length < 10}
+                    className="flex-1 h-14 rounded-full bg-vela-public text-base font-bold text-white disabled:opacity-50"
+                  >
+                    {enviando ? 'Enviando...' : 'Enviar a Vela'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

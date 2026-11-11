@@ -16,6 +16,9 @@ export type ResultadoAceptar =
   | { ok: true; chatId: string | null }
   | { ok: false; error: string; choque?: boolean };
 
+const AVISO_SEPARACION =
+  'Para agendar otro debe haber al menos 20 minutos de diferencia entre una cita y otra.';
+
 /**
  * Aceptar una solicitud = abrir el chat y dejar la cita lista para revisar.
  * NO confirma el encuentro: cada persona lo revisa y confirma después, desde el chat.
@@ -46,8 +49,8 @@ export async function aceptarSolicitud(
       choque: true,
       error:
         rev.quien === 'proveedora'
-          ? 'Ya tienes un evento reservado a esa hora. No puedes aceptar esta solicitud: recházala o pide otro horario.'
-          : 'Este perfil ya tiene un evento reservado a esa hora. No puedes aceptar esta solicitud.',
+          ? `Ya tienes un evento reservado a esa hora. No puedes aceptar esta solicitud: recházala o pide otro horario. ${AVISO_SEPARACION}`
+          : `Este perfil ya tiene un evento reservado a esa hora. No puedes aceptar esta solicitud. ${AVISO_SEPARACION}`,
     };
   }
 
