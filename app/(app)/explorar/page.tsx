@@ -11,6 +11,7 @@
  *     · deslizar (a los lados o arriba/abajo) = pasar de perfil
  *     · icono de ojo = abrir el perfil completo
  *     · corazon = SOLO da/quita "me gusta"
+ *     · estrella (junto al filtro) = mi plan; al tocarla suben los planes disponibles
  *   Vistas de cuadricula/lista y filtros avanzados: visibles para todos; si el plan no los incluye
  *   sube la ventana de planes (hook useAccesoPlan).
  *   La pantalla recuerda filtros y el perfil donde ibas al volver de un perfil o al recargar.
@@ -41,7 +42,7 @@ import {
   IconoCorazon,
 } from '@/components/iconos';
 import { notificarMeEncanta } from '@/lib/notificaciones/meEncanta';
-import { estiloAro, colorAro, ETIQUETA_PLAN } from '@/lib/planes/colorPlan';
+import { colorAro } from '@/lib/planes/colorPlan';
 
 type PerfilPublico = {
   id: string;
@@ -154,6 +155,15 @@ function IconoFiltro({ size = 20 }: { size?: number }) {
   );
 }
 
+/** Icono de estrella (mismo tamaño que el icono de filtro). */
+function IconoEstrella({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 2.8l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 17.6l-5.8 3.1 1.1-6.5L2.6 9.6l6.5-.9L12 2.8z" />
+    </svg>
+  );
+}
+
 /** Icono de ojo: abrir el perfil completo. */
 function IconoOjo({ size = 22 }: { size?: number }) {
   return (
@@ -185,11 +195,43 @@ function BotonFiltros({ onClick, activo, sobreFoto }: { onClick: () => void; act
   );
 }
 
+/**
+ * Estrella de MI plan, junto al filtro. Va del color de mi plan (VIP dorado, los demás con el color
+ * que ya tenía cada plan). Al tocarla suben los planes disponibles.
+ */
+function BotonPlan({ plan, etiqueta, onClick, sobreFoto }: {
+  plan: string; etiqueta: string; onClick: () => void; sobreFoto: boolean;
+}) {
+  const colorPropio = plan === 'vip' ? null : colorAro(plan, true);
+  const claseColor =
+    plan === 'vip'
+      ? 'text-vela-amber'
+      : colorPropio
+        ? ''
+        : sobreFoto ? 'text-white' : 'text-vela-text-dim';
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={`Tu plan: ${etiqueta}. Ver planes`}
+      title={`Plan ${etiqueta}`}
+      className={`w-10 h-10 rounded-full border flex items-center justify-center ${claseColor} ${
+        sobreFoto
+          ? 'bg-black/40 border-white/30 backdrop-blur-sm'
+          : 'bg-vela-surface-2 border-vela-line'
+      }`}
+      style={colorPropio ? { color: colorPropio } : undefined}
+    >
+      <IconoEstrella size={18} />
+    </button>
+  );
+}
+
 function ExplorarCliente() {
   const { perfil } = useSession();
-  const { tieneAcceso, requerir } = useAccesoPlan();
+  const { tieneAcceso, requerir, mostrarPlanes } = useAccesoPlan();
   const cap = perfil ? CAPACIDADES[perfil.plan] : CAPACIDADES.basico;
-  const soyVip = perfil?.plan === 'vip';
+  const miPlan = perfil?.plan ?? 'basico';
 
   // Por defecto todos ven la tarjeta única. Quien no tiene las vistas extra en su plan siempre la ve.
   const [vista, setVista] = useState<Vista>('tarjeta');
@@ -465,6 +507,8 @@ function ExplorarCliente() {
     setADescartar(null);
   }
 
+  const etiquetaMiPlan = cap.label;
+
   return (
     <main
       className={
@@ -476,7 +520,10 @@ function ExplorarCliente() {
       {!pantallaCompleta && (
         <div className="flex items-center justify-between mb-3">
           <h1 className="text-xl font-bold text-vela-text">Explorar</h1>
-          <BotonFiltros onClick={() => setShowFiltros(true)} activo={hayFiltros} sobreFoto={false} />
+          <div className="flex items-center gap-2">
+            <BotonPlan plan={miPlan} etiqueta={etiquetaMiPlan} onClick={mostrarPlanes} sobreFoto={false} />
+            <BotonFiltros onClick={() => setShowFiltros(true)} activo={hayFiltros} sobreFoto={false} />
+          </div>
         </div>
       )}
 
@@ -508,19 +555,23 @@ function ExplorarCliente() {
           meEncantaIds={meEncantaIds}
           onToggleMeEncanta={toggleMeEncanta}
           onPedirDescartar={pedirDescartar}
-          soyVip={soyVip}
-          botonFiltros={<BotonFiltros onClick={() => setShowFiltros(true)} activo={hayFiltros} sobreFoto />}
+          botonesArriba={
+            <div className="flex items-center gap-2">
+              <BotonPlan plan={miPlan} etiqueta={etiquetaMiPlan} onClick={mostrarPlanes} sobreFoto />
+              <BotonFiltros onClick={() => setShowFiltros(true)} activo={hayFiltros} sobreFoto />
+            </div>
+          }
         />
       ) : vistaActual === 'cuadricula' ? (
         <div className="grid grid-cols-2 gap-3">
           {limitados.map((p) => (
-            <TarjetaGrid key={p.id} p={p} soyVip={soyVip} meEncanta={meEncantaIds.has(p.id)} onToggleMeEncanta={toggleMeEncanta} onPedirDescartar={pedirDescartar} />
+            <TarjetaGrid key={p.id} p={p} meEncanta={meEncantaIds.has(p.id)} onToggleMeEncanta={toggleMeEncanta} onPedirDescartar={pedirDescartar} />
           ))}
         </div>
       ) : (
         <div className="flex flex-col gap-3">
           {limitados.map((p) => (
-            <TarjetaLista key={p.id} p={p} soyVip={soyVip} meEncanta={meEncantaIds.has(p.id)} onToggleMeEncanta={toggleMeEncanta} onPedirDescartar={pedirDescartar} />
+            <TarjetaLista key={p.id} p={p} meEncanta={meEncantaIds.has(p.id)} onToggleMeEncanta={toggleMeEncanta} onPedirDescartar={pedirDescartar} />
           ))}
         </div>
       )}
@@ -561,11 +612,11 @@ function ExplorarCliente() {
  * y la barra de navegación (que es otra parte de la pantalla: nunca se sobrepone a la foto).
  * La foto CUBRE todo el espacio (se recorta lo que sobra) y los botones flotan encima.
  */
-function TarjetaUnica({ perfiles, indice, setIndice, meEncantaIds, onToggleMeEncanta, onPedirDescartar, soyVip, botonFiltros }: {
+function TarjetaUnica({ perfiles, indice, setIndice, meEncantaIds, onToggleMeEncanta, onPedirDescartar, botonesArriba }: {
   perfiles: PerfilPublico[]; indice: number; setIndice: (i: number) => void;
   meEncantaIds: Set<string>; onToggleMeEncanta: (id: string) => void;
-  onPedirDescartar: (p: PerfilPublico) => void; soyVip: boolean;
-  botonFiltros: ReactNode;
+  onPedirDescartar: (p: PerfilPublico) => void;
+  botonesArriba: ReactNode;
 }) {
   const total = perfiles.length;
   const actual = total > 0 ? ((indice % total) + total) % total : 0;
@@ -596,7 +647,7 @@ function TarjetaUnica({ perfiles, indice, setIndice, meEncantaIds, onToggleMeEnc
     const ini = inicio.current;
     inicio.current = null;
     if (!ini) return;
-    // Los botones (✕, ❤️, ojo, filtros) hacen lo suyo; no cuentan como toque en la foto.
+    // Los botones (✕, ❤️, ojo, estrella, filtros) hacen lo suyo; no cuentan como toque en la foto.
     if ((e.target as HTMLElement).closest('button, a')) return;
 
     const dx = e.clientX - ini.x;
@@ -625,7 +676,7 @@ function TarjetaUnica({ perfiles, indice, setIndice, meEncantaIds, onToggleMeEnc
   return (
     <div
       className="relative flex min-h-0 w-full flex-1 select-none flex-col justify-end overflow-hidden bg-black"
-      style={{ ...(estiloAro(p.plan, soyVip) ?? {}), touchAction: 'none' }}
+      style={{ touchAction: 'none' }}
       onPointerDown={alBajar}
       onPointerUp={alSoltar}
       onPointerCancel={() => { inicio.current = null; }}
@@ -656,25 +707,14 @@ function TarjetaUnica({ perfiles, indice, setIndice, meEncantaIds, onToggleMeEnc
         </div>
       )}
 
-      {/* Fila de arriba (flotando sobre la foto): posición, plan y filtros */}
+      {/* Fila de arriba (flotando sobre la foto): posición, estrella de mi plan y filtros */}
       <div className="absolute top-6 left-3 right-3 z-20 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 pointer-events-none">
           <span className="text-[11px] font-bold bg-black/45 text-white rounded-full px-2.5 py-1">
             {actual + 1} / {total}
           </span>
-          {p.plan === 'vip' && (
-            <span className="text-[10px] font-extrabold bg-vela-amber text-black rounded-full px-2.5 py-1">★ VIP</span>
-          )}
-          {soyVip && p.plan !== 'vip' && colorAro(p.plan, true) && (
-            <span
-              className="text-[10px] font-extrabold text-black rounded-full px-2.5 py-1"
-              style={{ backgroundColor: colorAro(p.plan, true) ?? undefined }}
-            >
-              {ETIQUETA_PLAN[p.plan]}
-            </span>
-          )}
         </div>
-        {botonFiltros}
+        {botonesArriba}
       </div>
 
       <div className="relative z-20 flex items-end justify-between gap-3 px-5 pb-3 text-white">
@@ -716,16 +756,13 @@ function TarjetaUnica({ perfiles, indice, setIndice, meEncantaIds, onToggleMeEnc
   );
 }
 
-function TarjetaGrid({ p, soyVip, meEncanta, onToggleMeEncanta, onPedirDescartar }: {
-  p: PerfilPublico; soyVip: boolean; meEncanta: boolean;
+function TarjetaGrid({ p, meEncanta, onToggleMeEncanta, onPedirDescartar }: {
+  p: PerfilPublico; meEncanta: boolean;
   onToggleMeEncanta: (id: string) => void; onPedirDescartar: (p: PerfilPublico) => void;
 }) {
   const foto = p.foto_url;
   return (
-    <div
-      style={estiloAro(p.plan, soyVip)}
-      className="relative rounded-3xl overflow-hidden border border-vela-line bg-vela-surface aspect-[3/4.4]"
-    >
+    <div className="relative rounded-3xl overflow-hidden border border-vela-line bg-vela-surface aspect-[3/4.4]">
       {foto ? (
         <FotoAjustada src={foto} />
       ) : (
@@ -735,18 +772,6 @@ function TarjetaGrid({ p, soyVip, meEncanta, onToggleMeEncanta, onPedirDescartar
 
       {/* Tocar la imagen abre el perfil; los botones van por encima */}
       <Link href={`/perfil-detalle/${p.id}`} className="absolute inset-0 z-10" aria-label={`Ver perfil de ${p.alias}`} />
-
-      {p.plan === 'vip' && (
-        <span className="absolute top-2 right-2 z-20 text-[9px] font-extrabold bg-vela-amber text-black rounded-full px-2 py-0.5 pointer-events-none">★ VIP</span>
-      )}
-      {soyVip && p.plan !== 'vip' && colorAro(p.plan, true) && (
-        <span
-          className="absolute top-2 right-2 z-20 text-[9px] font-extrabold text-black rounded-full px-2 py-0.5 pointer-events-none"
-          style={{ backgroundColor: colorAro(p.plan, true) ?? undefined }}
-        >
-          {ETIQUETA_PLAN[p.plan]}
-        </span>
-      )}
 
       <div className="absolute bottom-0 left-0 right-0 z-20 p-3 text-white pointer-events-none">
         <p className="text-sm font-bold italic truncate">{p.alias}{p.edad ? `, ${p.edad}` : ''}</p>
@@ -775,28 +800,22 @@ function TarjetaGrid({ p, soyVip, meEncanta, onToggleMeEncanta, onPedirDescartar
   );
 }
 
-function TarjetaLista({ p, soyVip, meEncanta, onToggleMeEncanta, onPedirDescartar }: {
-  p: PerfilPublico; soyVip: boolean; meEncanta: boolean;
+function TarjetaLista({ p, meEncanta, onToggleMeEncanta, onPedirDescartar }: {
+  p: PerfilPublico; meEncanta: boolean;
   onToggleMeEncanta: (id: string) => void; onPedirDescartar: (p: PerfilPublico) => void;
 }) {
   const foto = p.foto_url;
   return (
     <div className="bg-vela-surface border border-vela-line rounded-2xl p-4 flex flex-col gap-3">
       <Link href={`/perfil-detalle/${p.id}`} className="flex gap-3 items-center">
-        <div className="w-16 h-16 rounded-full overflow-hidden flex-shrink-0" style={{ backgroundColor: p.avatar_color, ...(estiloAro(p.plan, soyVip) ?? {}) }}>
+        <div className="w-16 h-16 rounded-full overflow-hidden flex-shrink-0" style={{ backgroundColor: p.avatar_color }}>
           {foto && (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={foto} alt="" className="w-full h-full object-cover object-top" />
           )}
         </div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            <p className="text-base font-bold text-vela-text italic truncate">{p.alias}{p.edad ? `, ${p.edad}` : ''}</p>
-            {p.plan === 'vip' && <span className="text-[10px] font-extrabold text-vela-amber">★ VIP</span>}
-            {soyVip && p.plan !== 'vip' && colorAro(p.plan, true) && (
-              <span className="text-[10px] font-extrabold" style={{ color: colorAro(p.plan, true) ?? undefined }}>{ETIQUETA_PLAN[p.plan]}</span>
-            )}
-          </div>
+          <p className="text-base font-bold text-vela-text italic truncate">{p.alias}{p.edad ? `, ${p.edad}` : ''}</p>
           <LineasInfo
             p={p}
             tamIcono={16}
@@ -1256,10 +1275,7 @@ function SolicitudesRecibidas() {
                 <div className="min-w-0">
                   <p className="text-lg font-bold text-vela-text italic truncate">{s.alias}</p>
                   {etiquetaPlan(s.plan) && (
-                    <p
-                      className="text-xs font-extrabold tracking-wide"
-                      style={{ color: (s.plan && colorAro(s.plan, true)) || undefined }}
-                    >
+                    <p className="text-xs font-bold tracking-wide text-vela-text-faint">
                       Plan {etiquetaPlan(s.plan)}
                     </p>
                   )}
@@ -1333,5 +1349,14 @@ function SolicitudesRecibidas() {
         </div>
       )}
     </main>
+  );
+}
+
+/** Flecha de los botones principales (solo diseño). */
+function IconoFlecha() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 12h14M13 6l6 6-6 6" />
+    </svg>
   );
 }
