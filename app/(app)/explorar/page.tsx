@@ -1265,3 +1265,98 @@ function SolicitudesRecibidas() {
             <div key={s.id} className="bg-vela-surface border border-vela-line rounded-3xl p-5">
               <div className="flex items-center gap-3 mb-3">
                 <div className="w-12 h-12 rounded-full overflow-hidden flex items-center justify-center flex-shrink-0" style={{ backgroundColor: s.avatar_color }}>
+                  {s.foto_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={s.foto_url} alt="" className="w-full h-full object-cover object-top" />
+                  ) : (
+                    <span className="text-white font-bold text-sm">{s.alias.charAt(0)}</span>
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-lg font-bold text-vela-text italic truncate">{s.alias}</p>
+                  {etiquetaPlan(s.plan) && (
+                    <p className="text-xs font-bold tracking-wide text-vela-text-faint">
+                      Plan {etiquetaPlan(s.plan)}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 mb-3 text-sm text-vela-text-dim">
+                <p className="flex items-center gap-2 min-w-0"><IconoEncuentros size={18} className="flex-shrink-0 text-vela-text-faint" /><span className="truncate">{s.fecha}</span></p>
+                <p className="flex items-center gap-2 min-w-0"><IconoHora size={18} className="flex-shrink-0 text-vela-text-faint" /><span className="truncate">{formatoHora12(s.hora)}</span></p>
+                <p className="flex items-center gap-2 min-w-0"><IconoDuracion size={18} className="flex-shrink-0 text-vela-text-faint" /><span className="truncate">{s.duracion}</span></p>
+                <p className="flex items-center gap-2 min-w-0"><IconoUbicacion size={18} className="flex-shrink-0 text-vela-text-faint" /><span className="truncate">{s.lugar}</span></p>
+              </div>
+              {s.mensaje && <p className="text-sm text-vela-text-faint italic mb-3">"{s.mensaje}"</p>}
+
+              {rechazando?.id === s.id ? (
+                <div className="flex flex-col gap-3 bg-vela-surface-2 rounded-2xl p-4 border border-vela-line">
+                  <p className="text-xs font-bold text-vela-text-faint">¿Por qué rechazas esta solicitud?</p>
+                  <div className="flex flex-wrap gap-2">
+                    {MOTIVOS_RECHAZO_SOLICITUD.map((m) => (
+                      <button
+                        key={m.texto}
+                        onClick={() => setMotivoRechazo(m.texto)}
+                        className={`px-4 py-2.5 rounded-full text-sm font-medium border ${
+                          motivoRechazo === m.texto ? 'bg-vela-public-soft border-vela-public text-vela-public' : 'bg-vela-surface border-vela-line text-vela-text-faint'
+                        }`}
+                      >
+                        {m.texto}
+                      </button>
+                    ))}
+                  </div>
+                  {motivoRechazo && MOTIVOS_RECHAZO_SOLICITUD.find((m) => m.texto === motivoRechazo)?.bloquea && (
+                    <p className="text-[11px] text-vela-safety">
+                      Este perfil quedará bloqueado: no podrá ver tu perfil ni enviarte más solicitudes.
+                    </p>
+                  )}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => { setRechazando(null); setMotivoRechazo(null); }}
+                      className="flex-1 h-12 rounded-full bg-vela-surface border border-vela-line text-vela-text-faint text-sm font-bold"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      onClick={confirmarRechazo}
+                      disabled={!motivoRechazo || procesando === s.id}
+                      className="flex-1 h-12 rounded-full bg-vela-safety text-white text-sm font-bold disabled:opacity-50"
+                    >
+                      {procesando === s.id ? '...' : 'Confirmar'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => abrirRechazo(s)}
+                    disabled={procesando === s.id}
+                    className="flex-1 h-14 rounded-full border-[1.5px] border-vela-public bg-transparent text-vela-text text-base font-bold disabled:opacity-50"
+                  >
+                    Rechazar
+                  </button>
+                  <button
+                    onClick={() => aceptar(s)}
+                    disabled={procesando === s.id}
+                    className="flex-1 h-14 rounded-full bg-vela-public text-white text-base font-bold flex items-center justify-center disabled:opacity-50"
+                  >
+                    {procesando === s.id ? '...' : 'Aceptar'}
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </main>
+  );
+}
+
+/** Flecha de los botones principales (solo diseño). */
+function IconoFlecha() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 12h14M13 6l6 6-6 6" />
+    </svg>
+  );
+}
