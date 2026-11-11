@@ -6,6 +6,7 @@
  * - cliente: explora los perfiles de "quiero ser descubierta" que le asigna la base de datos
  *   (lote de 24 horas; el cliente VIP las ve a todas). Pantalla principal: perfil a PANTALLA COMPLETA
  *   (como Tinder / TikTok), entre el borde de arriba y la barra de navegacion.
+ *     · la foto CUBRE toda la pantalla; los botones flotan encima
  *     · tocar el lado izquierdo/derecho de la foto = pasar de foto
  *     · deslizar (a los lados o arriba/abajo) = pasar de perfil
  *     · icono de ojo = abrir el perfil completo
@@ -558,6 +559,7 @@ function ExplorarCliente() {
 /**
  * Perfil a pantalla completa (como Tinder / TikTok). Ocupa todo el espacio entre el borde de arriba
  * y la barra de navegación (que es otra parte de la pantalla: nunca se sobrepone a la foto).
+ * La foto CUBRE todo el espacio (se recorta lo que sobra) y los botones flotan encima.
  */
 function TarjetaUnica({ perfiles, indice, setIndice, meEncantaIds, onToggleMeEncanta, onPedirDescartar, soyVip, botonFiltros }: {
   perfiles: PerfilPublico[]; indice: number; setIndice: (i: number) => void;
@@ -629,7 +631,15 @@ function TarjetaUnica({ perfiles, indice, setIndice, meEncantaIds, onToggleMeEnc
       onPointerCancel={() => { inicio.current = null; }}
     >
       {fotoActual ? (
-        <FotoAjustada src={fotoActual} />
+        // La foto cubre TODO el espacio (como Tinder): se recorta lo que sobra, sin franjas vacías.
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={fotoActual}
+          alt={p.alias}
+          draggable={false}
+          className="absolute inset-0 h-full w-full select-none object-cover"
+          style={{ objectPosition: '50% 30%' }}
+        />
       ) : (
         <div className="absolute inset-0" style={{ backgroundColor: p.avatar_color }} />
       )}
@@ -646,7 +656,7 @@ function TarjetaUnica({ perfiles, indice, setIndice, meEncantaIds, onToggleMeEnc
         </div>
       )}
 
-      {/* Fila de arriba: posición, plan y filtros */}
+      {/* Fila de arriba (flotando sobre la foto): posición, plan y filtros */}
       <div className="absolute top-6 left-3 right-3 z-20 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 pointer-events-none">
           <span className="text-[11px] font-bold bg-black/45 text-white rounded-full px-2.5 py-1">
@@ -669,12 +679,12 @@ function TarjetaUnica({ perfiles, indice, setIndice, meEncantaIds, onToggleMeEnc
 
       <div className="relative z-20 flex items-end justify-between gap-3 px-5 pb-3 text-white">
         <div className="min-w-0 pointer-events-none">
-          <p className="text-3xl font-extrabold italic truncate">{p.alias}{p.edad ? `, ${p.edad}` : ''}</p>
+          <p className="text-3xl font-extrabold italic truncate drop-shadow">{p.alias}{p.edad ? `, ${p.edad}` : ''}</p>
           <LineasInfo
             p={p}
             tamIcono={18}
-            claseUbicacion="text-sm opacity-90"
-            claseRegalo="text-sm opacity-90"
+            claseUbicacion="text-sm opacity-95"
+            claseRegalo="text-sm opacity-95"
             textoSinCiudad="Sin ciudad"
           />
         </div>
@@ -687,11 +697,12 @@ function TarjetaUnica({ perfiles, indice, setIndice, meEncantaIds, onToggleMeEnc
           <IconoOjo size={24} />
         </Link>
       </div>
-      <div className="relative z-20 flex gap-4 justify-center pb-6 pt-1">
+      {/* Botones flotantes de rechazar / me gusta */}
+      <div className="relative z-20 flex gap-5 justify-center pb-6 pt-1">
         <button
           type="button"
           onClick={() => onPedirDescartar(p)}
-          className="w-16 h-16 rounded-full bg-white flex items-center justify-center text-vela-safety shadow-lg"
+          className="w-16 h-16 rounded-full bg-white flex items-center justify-center text-vela-safety shadow-xl"
           aria-label="Eliminar perfil"
         ><IconoCerrar size={28} stroke={2.4} /></button>
         <BotonMeEncanta
@@ -1322,14 +1333,5 @@ function SolicitudesRecibidas() {
         </div>
       )}
     </main>
-  );
-}
-
-/** Flecha de los botones principales (solo diseño). */
-function IconoFlecha() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M5 12h14M13 6l6 6-6 6" />
-    </svg>
   );
 }
