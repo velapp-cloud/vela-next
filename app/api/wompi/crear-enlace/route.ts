@@ -2,7 +2,7 @@
  * app/api/wompi/crear-enlace/route.ts
  * POST { plan } con "Authorization: Bearer <token de sesión>".
  * Crea un pago pendiente y un enlace de Wompi; responde { url } para redirigir al cliente.
- * El monto sale SIEMPRE de CAPACIDADES en el servidor (cuentas de prueba pagan $0.01).
+ * El monto sale SIEMPRE de CAPACIDADES en el servidor (cuentas de prueba pagan $1.00).
  */
 import { NextResponse } from 'next/server';
 import { randomBytes } from 'crypto';
@@ -15,6 +15,9 @@ export const dynamic = 'force-dynamic';
 
 const PLANES_VALIDOS: Plan[] = ['basico', 'premium', 'gold', 'vip'];
 const SITIO = process.env.SITE_URL ?? 'https://www.myvelapp.com';
+
+// Monto que pagan las cuentas marcadas como es_cuenta_prueba (Wompi no acepta $0.01 en su pantalla de pago).
+const MONTO_CUENTA_PRUEBA = 1.0;
 
 export async function POST(req: Request) {
   const token = (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
@@ -61,7 +64,7 @@ export async function POST(req: Request) {
   }
 
   const cap = CAPACIDADES[planElegido];
-  const monto = perfil.es_cuenta_prueba ? 0.01 : cap.precioMes;
+  const monto = perfil.es_cuenta_prueba ? MONTO_CUENTA_PRUEBA : cap.precioMes;
   const referencia = 'VELA-' + randomBytes(8).toString('hex');
 
   const { error: errorInsert } = await servicio.from('pagos').insert({
