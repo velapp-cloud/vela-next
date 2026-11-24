@@ -3,6 +3,7 @@
  * Conexión con Wompi El Salvador (solo servidor):
  *  - token OAuth (client credentials), reutilizado hasta que expire
  *  - crear enlace de pago
+ *  - consultar una transacción (GET /TransaccionCompra/{id}): la verificación real del pago
  *  - validar la firma de un webhook (header wompi_hash = HMAC-SHA256 del cuerpo)
  */
 import { createHmac, timingSafeEqual } from 'crypto';
@@ -80,6 +81,42 @@ export async function crearEnlacePago(datos: {
   return { idEnlace: Number(json.idEnlace), urlEnlace: String(json.urlEnlace) };
 }
 
+export type TransaccionWompi = { esReal: boolean; esAprobada: boolean; monto: number };
+
+function esVerdadero(valor: unknown): boolean {
+  return valor === true || valor === 'true' || valor === 'True';
+}
+
+/**
+ * Consulta a Wompi el resultado de una transacción. Es la verificación autoritativa:
+ * una transacción es exitosa si esReal y esAprobada son verdaderos y el monto coincide.
+ */
+export async function consultarTransaccion(idTransaccion: string): Promise<TransaccionWompi> {
+  const token = await obtenerToken();
+  const resp = await fetch(`${URL_API}/TransaccionCompra/${encodeURIComponent(idTransaccion)}`, {
+    method: 'GET',
+    headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    cache: 'no-store',
+  });
+  const texto = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`Wompi no pudo consultar la transacción (HTTP ${resp.status}): ${texto.slice(0, 200)}`);
+  }
+  let d: any;
+  try {
+    d = JSON.parse(texto);
+  } catch {
+    throw new Error('Wompi devolvió una transacción que no se pudo leer');
+  }
+  const monto = Number(d.monto ?? d.Monto ?? d.montoOriginal ?? d.MontoOriginal);
+  if (!Number.isFinite(monto)) throw new Error('La transacción de Wompi no trae un monto válido');
+  return {
+    esReal: esVerdadero(d.esReal ?? d.EsReal),
+    esAprobada: esVerdadero(d.esAprobada ?? d.EsAprobada),
+    monto,
+  };
+}
+
 function iguales(a: string, b: string): boolean {
   const ba = Buffer.from(a);
   const bb = Buffer.from(b);
@@ -89,6 +126,7 @@ function iguales(a: string, b: string): boolean {
 /**
  * La firma es el HMAC-SHA256 del cuerpo EXACTO, con el API Secret como llave.
  * La documentación no dice si va en hexadecimal o base64: se aceptan ambos.
+ * Hoy solo se registra (el pago se confirma consultando a Wompi, que no se puede falsear).
  */
 export function validarFirmaWebhook(cuerpoCrudo: string, firmaRecibida: string | null): boolean {
   const secreto = process.env.WOMPI_API_SECRET;
