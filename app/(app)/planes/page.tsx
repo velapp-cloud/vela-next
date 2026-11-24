@@ -8,40 +8,72 @@ import PlanBadge, { ESTILO_PLAN } from '@/components/PlanBadge';
 
 /**
  * app/(app)/planes/page.tsx
- * NOTA: el cambio de plan aqui solo actualiza la base de datos
- * directamente (sin pasarela de pago todavia) — cuando integres
- * pagos reales, este boton debe redirigir al checkout en vez de
- * actualizar el plan de una vez. Mientras tanto se guarda
- * plan_vence_en (+30 dias) para simular el "plan activo".
+ * Elegir un plan lleva al pago con Wompi (30 días). El plan NO se cambia aquí:
+ * lo activa el servidor cuando Wompi confirma el pago (webhook).
  */
 const ORDEN_PLANES: Plan[] = ['basico', 'premium', 'gold', 'vip'];
-const DIAS_PLAN = 30;
 
 export default function Planes() {
-  const { perfil, refrescar } = useSession();
+  const { perfil } = useSession();
   const [cambiando, setCambiando] = useState<Plan | null>(null);
+  const [error, setError] = useState('');
 
-  async function cambiarPlan(plan: Plan) {
+  async function pagar(plan: Plan) {
     if (!perfil || cambiando) return;
-    setCambiando(plan);
-    const supabase = createClient();
-    const vence = new Date(Date.now() + DIAS_PLAN * 24 * 60 * 60 * 1000).toISOString();
-    const { error } = await supabase
-      .from('perfiles')
-      .update({ plan, plan_vence_en: vence })
-      .eq('id', perfil.id);
-    setCambiando(null);
-    if (error) {
-      console.error('Error cambiando de plan:', error);
-      return;
+
+    // Pagar un plan más bajo que el actual lo reemplaza desde hoy: se confirma antes.
+    const idxActual = ORDEN_PLANES.indexOf(perfil.plan as Plan);
+    const idxElegido = ORDEN_PLANES.indexOf(plan);
+    if (idxActual > idxElegido) {
+      const seguir = window.confirm(
+        `Tu plan actual es ${CAPACIDADES[perfil.plan as Plan]?.label ?? perfil.plan}. ` +
+        `Pagar ${CAPACIDADES[plan].label} lo reemplaza desde hoy. ¿Continuar?`,
+      );
+      if (!seguir) return;
     }
-    refrescar();
+
+    setError('');
+    setCambiando(plan);
+    try {
+      const supabase = createClient();
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) {
+        setError('Tu sesión expiró. Entra de nuevo.');
+        setCambiando(null);
+        return;
+      }
+
+      const resp = await fetch('/api/wompi/crear-enlace', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ plan }),
+      });
+      const json = await resp.json().catch(() => ({} as any));
+      if (!resp.ok || !json.url) {
+        setError(json.error ?? 'No se pudo iniciar el pago. Intenta de nuevo.');
+        setCambiando(null);
+        return;
+      }
+      // Se queda "Redirigiendo..." hasta que el navegador cambie de página.
+      window.location.href = json.url as string;
+    } catch (err) {
+      console.error('Error iniciando el pago:', err);
+      setError('No se pudo iniciar el pago. Revisa tu conexión e intenta de nuevo.');
+      setCambiando(null);
+    }
   }
 
   return (
     <main className="flex-1 px-6 py-8 max-w-md mx-auto w-full">
       <h1 className="text-[28px] leading-tight font-bold text-vela-text mb-1">Planes</h1>
       <p className="text-base text-vela-text-faint mb-6">Elige el plan que mejor se ajuste a lo que buscas.</p>
+
+      {error && (
+        <div className="bg-vela-safety-soft border border-vela-safety rounded-2xl p-4 mb-4">
+          <p className="text-xs text-vela-safety">{error}</p>
+        </div>
+      )}
 
       <div className="flex flex-col gap-4">
         {ORDEN_PLANES.map((planKey) => {
@@ -80,28 +112,31 @@ export default function Planes() {
                 <Beneficio texto={`Soporte ${cap.soporte.toLowerCase()}`} />
               </ul>
 
-              {esActual ? (
-                <div className="w-full h-14 rounded-full bg-vela-surface-2 text-vela-text-faint text-base font-semibold flex items-center justify-center">
+              {esActual && (
+                <div className="w-full h-12 rounded-full bg-vela-surface-2 text-vela-text-faint text-base font-semibold flex items-center justify-center mb-3">
                   Tu plan actual
                 </div>
-              ) : (
-                <button
-                  onClick={() => cambiarPlan(planKey)}
-                  disabled={cambiando !== null}
-                  className={`w-full h-14 rounded-full text-base font-bold flex items-center justify-center gap-2 disabled:opacity-50 ${estilo.boton}`}
-                >
-                  {cambiando === planKey ? 'Cambiando...' : (
-                    <>
-                      Elegir este plan
-                      <IconoFlecha />
-                    </>
-                  )}
-                </button>
               )}
+              <button
+                onClick={() => pagar(planKey)}
+                disabled={cambiando !== null}
+                className={`w-full h-14 rounded-full text-base font-bold flex items-center justify-center gap-2 disabled:opacity-50 ${estilo.boton}`}
+              >
+                {cambiando === planKey ? 'Redirigiendo al pago...' : (
+                  <>
+                    {esActual ? 'Renovar 30 días' : 'Elegir este plan'}
+                    <IconoFlecha />
+                  </>
+                )}
+              </button>
             </div>
           );
         })}
       </div>
+
+      <p className="text-xs text-vela-text-faint text-center mt-6">
+        Pago seguro con Wompi. Cada pago activa tu plan por 30 días.
+      </p>
     </main>
   );
 }
