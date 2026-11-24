@@ -1,6 +1,7 @@
 /**
  * app/api/wompi/crear-enlace/route.ts
- * POST { plan } con "Authorization: Bearer <token de sesión>".
+ * POST { plan, periodo } con "Authorization: Bearer <token de sesión>".
+ * periodo: 'mes' (30 días) o 'semana' (7 días). Si no viene, se asume 'mes'.
  * Crea un pago pendiente y un enlace de Wompi; responde { url } para redirigir al cliente.
  * El monto sale SIEMPRE de CAPACIDADES en el servidor (cuentas de prueba pagan $1.00).
  */
@@ -14,6 +15,8 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const PLANES_VALIDOS: Plan[] = ['basico', 'premium', 'gold', 'vip'];
+const DIAS_POR_PERIODO = { semana: 7, mes: 30 } as const;
+type Periodo = keyof typeof DIAS_POR_PERIODO;
 const SITIO = process.env.SITE_URL ?? 'https://www.myvelapp.com';
 
 // Monto que pagan las cuentas marcadas como es_cuenta_prueba (Wompi no acepta $0.01 en su pantalla de pago).
@@ -32,15 +35,21 @@ export async function POST(req: Request) {
   }
 
   let plan: unknown;
+  let periodo: unknown;
   try {
-    ({ plan } = await req.json());
+    ({ plan, periodo } = await req.json());
   } catch {
     return NextResponse.json({ error: 'Solicitud inválida.' }, { status: 400 });
   }
   if (typeof plan !== 'string' || !PLANES_VALIDOS.includes(plan as Plan)) {
     return NextResponse.json({ error: 'Plan inválido.' }, { status: 400 });
   }
+  if (periodo !== undefined && periodo !== 'semana' && periodo !== 'mes') {
+    return NextResponse.json({ error: 'Periodo inválido.' }, { status: 400 });
+  }
   const planElegido = plan as Plan;
+  const periodoElegido: Periodo = periodo === 'semana' ? 'semana' : 'mes';
+  const dias = DIAS_POR_PERIODO[periodoElegido];
 
   const { data: perfil } = await servicio
     .from('perfiles')
@@ -64,7 +73,8 @@ export async function POST(req: Request) {
   }
 
   const cap = CAPACIDADES[planElegido];
-  const monto = perfil.es_cuenta_prueba ? MONTO_CUENTA_PRUEBA : cap.precioMes;
+  const precioLista = periodoElegido === 'semana' ? cap.precioSemana : cap.precioMes;
+  const monto = Math.round((perfil.es_cuenta_prueba ? MONTO_CUENTA_PRUEBA : precioLista) * 100) / 100;
   const referencia = 'VELA-' + randomBytes(8).toString('hex');
 
   const { error: errorInsert } = await servicio.from('pagos').insert({
@@ -72,6 +82,8 @@ export async function POST(req: Request) {
     usuario_id: perfil.id,
     plan: planElegido,
     monto,
+    periodo: periodoElegido,
+    dias,
     estado: 'pendiente',
   });
   if (errorInsert) {
@@ -83,7 +95,7 @@ export async function POST(req: Request) {
     const enlace = await crearEnlacePago({
       referencia,
       monto,
-      nombreProducto: `Vela ${cap.label} - 30 dias`,
+      nombreProducto: `Vela ${cap.label} - ${dias} dias`,
       urlRedirect: `${SITIO}/planes/gracias`,
       urlWebhook: `${SITIO}/api/wompi/webhook`,
     });

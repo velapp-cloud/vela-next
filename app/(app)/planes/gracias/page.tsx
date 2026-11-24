@@ -130,7 +130,7 @@ export default function PagoGracias() {
         <>
           <h1 className="text-[28px] leading-tight font-bold text-vela-text">¡Pago confirmado!</h1>
           <p className="text-base text-vela-text-faint">
-            {etiquetaPlan ? `Tu plan ${etiquetaPlan} ya está activo por 30 días.` : 'Tu plan ya está activo por 30 días.'}
+            {etiquetaPlan ? `Tu plan ${etiquetaPlan} ya está activo.` : 'Tu plan ya está activo.'}
           </p>
           <p className="text-sm text-vela-text-faint">Te llevamos a Vela…</p>
           <Link

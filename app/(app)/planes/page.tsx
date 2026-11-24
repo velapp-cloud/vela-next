@@ -8,13 +8,23 @@ import PlanBadge, { ESTILO_PLAN } from '@/components/PlanBadge';
 
 /**
  * app/(app)/planes/page.tsx
- * Elegir un plan lleva al pago con Wompi (30 días). El plan NO se cambia aquí:
- * lo activa el servidor cuando Wompi confirma el pago (webhook).
+ * El cliente elige plan y por cuánto tiempo (mensual 30 días / semanal 7 días).
+ * El precio mostrado cambia con la elección y es el MISMO que el servidor cobra.
+ * El plan NO se cambia aquí: lo activa el servidor cuando Wompi confirma el pago.
  */
 const ORDEN_PLANES: Plan[] = ['basico', 'premium', 'gold', 'vip'];
 
+type Periodo = 'mes' | 'semana';
+const DIAS: Record<Periodo, number> = { mes: 30, semana: 7 };
+
+function precioDe(plan: Plan, periodo: Periodo): number {
+  const cap = CAPACIDADES[plan];
+  return periodo === 'semana' ? cap.precioSemana : cap.precioMes;
+}
+
 export default function Planes() {
   const { perfil } = useSession();
+  const [periodo, setPeriodo] = useState<Periodo>('mes');
   const [cambiando, setCambiando] = useState<Plan | null>(null);
   const [error, setError] = useState('');
 
@@ -47,7 +57,7 @@ export default function Planes() {
       const resp = await fetch('/api/wompi/crear-enlace', {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify({ plan }),
+        body: JSON.stringify({ plan, periodo }),
       });
       const json = await resp.json().catch(() => ({} as any));
       if (!resp.ok || !json.url) {
@@ -64,10 +74,30 @@ export default function Planes() {
     }
   }
 
+  const otroPeriodo: Periodo = periodo === 'mes' ? 'semana' : 'mes';
+
   return (
     <main className="flex-1 px-6 py-8 max-w-md mx-auto w-full">
       <h1 className="text-[28px] leading-tight font-bold text-vela-text mb-1">Planes</h1>
-      <p className="text-base text-vela-text-faint mb-6">Elige el plan que mejor se ajuste a lo que buscas.</p>
+      <p className="text-base text-vela-text-faint mb-5">Elige el plan que mejor se ajuste a lo que buscas.</p>
+
+      {/* Por cuánto tiempo lo necesitas */}
+      <div className="flex gap-1 bg-vela-surface-2 rounded-2xl p-1 mb-6" role="group" aria-label="Duración del plan">
+        {(['mes', 'semana'] as Periodo[]).map((p) => (
+          <button
+            key={p}
+            type="button"
+            onClick={() => setPeriodo(p)}
+            aria-pressed={periodo === p}
+            disabled={cambiando !== null}
+            className={`flex-1 h-11 rounded-xl text-sm font-semibold ${
+              periodo === p ? 'bg-vela-public text-white' : 'text-vela-text-faint'
+            }`}
+          >
+            {p === 'mes' ? 'Mensual · 30 días' : 'Semanal · 7 días'}
+          </button>
+        ))}
+      </div>
 
       {error && (
         <div className="bg-vela-safety-soft border border-vela-safety rounded-2xl p-4 mb-4">
@@ -80,6 +110,8 @@ export default function Planes() {
           const cap = CAPACIDADES[planKey];
           const estilo = ESTILO_PLAN[planKey];
           const esActual = perfil?.plan === planKey;
+          const precio = precioDe(planKey, periodo);
+          const precioOtro = precioDe(planKey, otroPeriodo);
           return (
             <div
               key={planKey}
@@ -92,10 +124,12 @@ export default function Planes() {
                 </div>
                 <div className="text-right">
                   <p className={`text-2xl font-extrabold ${estilo.acento}`}>
-                    ${cap.precioMes}
-                    <span className="text-sm text-vela-text-faint">/mes</span>
+                    ${precio.toFixed(2)}
+                    <span className="text-sm text-vela-text-faint">/{periodo === 'mes' ? 'mes' : 'semana'}</span>
                   </p>
-                  <p className="text-xs text-vela-text-faint">${cap.precioSemana}/semana</p>
+                  <p className="text-xs text-vela-text-faint">
+                    o ${precioOtro.toFixed(2)}/{otroPeriodo === 'mes' ? 'mes' : 'semana'}
+                  </p>
                 </div>
               </div>
 
@@ -124,7 +158,7 @@ export default function Planes() {
               >
                 {cambiando === planKey ? 'Redirigiendo al pago...' : (
                   <>
-                    {esActual ? 'Renovar 30 días' : 'Elegir este plan'}
+                    {esActual ? 'Renovar' : 'Pagar'} ${precio.toFixed(2)} · {DIAS[periodo]} días
                     <IconoFlecha />
                   </>
                 )}
@@ -135,7 +169,7 @@ export default function Planes() {
       </div>
 
       <p className="text-xs text-vela-text-faint text-center mt-6">
-        Pago seguro con Wompi. Cada pago activa tu plan por 30 días.
+        Pago seguro con Wompi. Tu plan se activa por el tiempo que elijas: 7 o 30 días.
       </p>
     </main>
   );
