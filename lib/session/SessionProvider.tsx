@@ -12,10 +12,16 @@
  * de que SESSION terminara de llenarse). Aqui ese riesgo desaparece
  * por diseño: "cargando" empieza en true y solo pasa a false DESPUES
  * de que "perfil" ya tiene los datos reales — nunca antes.
+ *
+ * Plan efectivo: si el plan pagado (o la prueba VIP) ya venció según plan_vence_en, la sesión
+ * lo trata como "básico" aunque la base todavía no lo haya bajado (el cron lo baja cada 15 min).
+ * Prueba VIP: enPrueba es true mientras plan_prueba_fin no haya pasado y no se haya pagado un plan
+ * que extienda el vencimiento más allá de la prueba. El popup de aviso se muestra una sola vez.
  */
 import { createContext, useContext, useEffect, useState, useCallback, ReactNode } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import type { Plan } from '@/lib/planes/capacidades';
+import PopupPruebaVip from '@/components/PopupPruebaVip';
 
 export type Rol = 'cliente' | 'proveedor';
 
@@ -34,6 +40,12 @@ export type PerfilSesion = {
   ciudad: string;
   hobbies: string[];
   esAdmin: boolean;
+  /** Fecha (ISO) en que termina el plan actual, o null si no vence. */
+  planVenceEn: string | null;
+  /** Fecha (ISO) en que termina la prueba VIP gratis, o null si nunca tuvo prueba. */
+  planPruebaFin: string | null;
+  /** true mientras la persona está usando la prueba VIP gratis. */
+  enPrueba: boolean;
 };
 
 type SessionContextType = {
@@ -71,11 +83,26 @@ async function cargarPerfilReal(): Promise<PerfilSesion | null> {
     .map((h: any) => h.hobbies?.label)
     .filter((l: any): l is string => !!l);
 
+  // Plan efectivo: un plan vencido cuenta como básico sin esperar al cron.
+  const ahora = Date.now();
+  const planBase: Plan = p.plan ?? 'basico';
+  const vence: number | null = p.plan_vence_en ? new Date(p.plan_vence_en).getTime() : null;
+  const venció = planBase !== 'basico' && vence !== null && vence < ahora && !p.es_admin;
+  const planEfectivo: Plan = venció ? 'basico' : planBase;
+
+  // En prueba: la prueba no ha terminado y el plan no se extendió más allá del fin de la prueba.
+  const pruebaFin: number | null = p.plan_prueba_fin ? new Date(p.plan_prueba_fin).getTime() : null;
+  const enPrueba =
+    pruebaFin !== null &&
+    pruebaFin > ahora &&
+    planEfectivo !== 'basico' &&
+    (vence === null || vence <= pruebaFin + 60_000);
+
   return {
     id: p.id,
     alias: p.alias,
     rol: p.rol,
-    plan: p.plan ?? 'basico',
+    plan: planEfectivo,
     avatarColor: p.avatar_color,
     fotos: p.fotos ?? [],
     calificacionProm: p.calificacion_prom ?? 5,
@@ -86,6 +113,9 @@ async function cargarPerfilReal(): Promise<PerfilSesion | null> {
     ciudad: p.ciudad ?? '',
     hobbies,
     esAdmin: !!p.es_admin,
+    planVenceEn: p.plan_vence_en ?? null,
+    planPruebaFin: p.plan_prueba_fin ?? null,
+    enPrueba,
   };
 }
 
@@ -122,6 +152,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   return (
     <SessionContext.Provider value={{ perfil, cargando, refrescar, cerrarSesion }}>
       {children}
+      {perfil && perfil.enPrueba && perfil.planPruebaFin && (
+        <PopupPruebaVip perfilId={perfil.id} finISO={perfil.planPruebaFin} />
+      )}
     </SessionContext.Provider>
   );
 }

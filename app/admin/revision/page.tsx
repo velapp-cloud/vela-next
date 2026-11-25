@@ -4,11 +4,21 @@
  * app/admin/revision/page.tsx
  * Cola de verificación de identidad. Solo accesible para es_admin
  * (lo protege app/admin/layout.tsx).
+ *
+ * Muestra además el género de la persona, a quién quiere conocer y, si se verificó con Didit,
+ * el estado de esa verificación y sus motivos (las imágenes del documento se ven en la consola de Didit).
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { calcularEdad } from '@/lib/utils/edad';
+import { IconoCerrar } from '@/components/iconos';
+
+type DiditInfo = {
+  sessionId: string;
+  estado: string;
+  motivos: string[];
+};
 
 type Solicitud = {
   perfilId: string;
@@ -19,9 +29,12 @@ type Solicitud = {
   rol: string;
   ciudad: string;
   edad: number | null;
+  genero: string;
+  buscaGeneros: string[];
   creado: string;
   selfieUrl: string | null;
   documentoUrl: string | null;
+  didit: DiditInfo | null;
   sinDocumentos: boolean;
 };
 
@@ -32,6 +45,36 @@ const MOTIVOS_RAPIDOS = [
   'El documento está vencido o incompleto.',
   'No se ve tu rostro con claridad en la selfie.',
 ];
+
+// Estados de Didit en los que la persona todavía no terminó su verificación.
+const DIDIT_EN_CURSO = ['Not Started', 'In Progress', 'Awaiting User'];
+
+function etiquetaGenero(g: string): string {
+  if (g === 'mujer') return 'Mujer';
+  if (g === 'hombre') return 'Hombre';
+  if (g === 'otro') return 'Otro';
+  return '—';
+}
+
+function etiquetaBusca(lista: string[]): string {
+  if (!lista || lista.length === 0) return '—';
+  if (lista.length >= 3) return 'Todos';
+  return lista.map((g) => (g === 'mujer' ? 'Mujeres' : g === 'hombre' ? 'Hombres' : 'Otros')).join(', ');
+}
+
+function etiquetaDidit(estado: string): string {
+  switch (estado) {
+    case 'Approved': return 'Aprobada por Didit';
+    case 'Declined': return 'Rechazada por Didit';
+    case 'In Review': return 'En revisión en Didit';
+    case 'Abandoned': return 'Abandonada';
+    case 'Expired': return 'Expirada';
+    case 'Not Started': return 'Sin iniciar';
+    case 'In Progress': return 'En curso';
+    case 'Awaiting User': return 'Esperando a la persona';
+    default: return estado;
+  }
+}
 
 export default function RevisionAdmin() {
   const router = useRouter();
@@ -47,7 +90,7 @@ export default function RevisionAdmin() {
 
     const { data: perfiles, error: errPerfiles } = await supabase
       .from('perfiles')
-      .select('id, alias, nombre_completo, correo, telefono, rol, ciudad, fecha_nacimiento, creado_en')
+      .select('id, alias, nombre_completo, correo, telefono, rol, ciudad, fecha_nacimiento, genero, busca_generos, creado_en')
       .eq('estado_verificacion', 'pendiente')
       .eq('registro_completo', true)
       .order('creado_en', { ascending: true });
@@ -68,7 +111,7 @@ export default function RevisionAdmin() {
     const ids = lista.map((p: any) => p.id);
     const { data: verifs, error: errVerifs } = await supabase
       .from('verificaciones_identidad')
-      .select('perfil_id, selfie_url, documento_url, creado_en')
+      .select('perfil_id, selfie_url, documento_url, proveedor, didit_session_id, didit_estado, didit_motivos, creado_en')
       .in('perfil_id', ids)
       .order('creado_en', { ascending: false });
 
@@ -90,6 +133,13 @@ export default function RevisionAdmin() {
     const resultado: Solicitud[] = await Promise.all(
       lista.map(async (p: any) => {
         const v = ultimaPorPerfil[p.id];
+        const didit: DiditInfo | null = v?.didit_session_id
+          ? {
+              sessionId: v.didit_session_id,
+              estado: v.didit_estado ?? 'Not Started',
+              motivos: v.didit_motivos ?? [],
+            }
+          : null;
         return {
           perfilId: p.id,
           alias: p.alias ?? '',
@@ -99,10 +149,13 @@ export default function RevisionAdmin() {
           rol: p.rol ?? '',
           ciudad: p.ciudad ?? '',
           edad: calcularEdad(p.fecha_nacimiento),
+          genero: p.genero ?? '',
+          buscaGeneros: p.busca_generos ?? [],
           creado: p.creado_en,
           selfieUrl: await firmar(v?.selfie_url ?? null),
           documentoUrl: await firmar(v?.documento_url ?? null),
-          sinDocumentos: !v,
+          didit,
+          sinDocumentos: !v || (!v.selfie_url && !v.documento_url && !v.didit_session_id),
         };
       }),
     );
@@ -125,22 +178,22 @@ export default function RevisionAdmin() {
   }
 
   return (
-    <main className="flex-1 px-5 py-8 max-w-4xl mx-auto w-full">
-      <div className="flex items-center justify-between mb-6 gap-3">
+    <main className="flex-1 px-6 py-8 max-w-4xl mx-auto w-full">
+      <div className="flex flex-wrap items-center justify-between mb-7 gap-3">
         <div>
-          <h1 className="font-serif italic text-2xl text-vela-public">Vela · Revisión</h1>
-          <p className="text-xs text-vela-text-faint mt-0.5">Verificación de identidad pendiente</p>
+          <h1 className="font-serif italic text-3xl text-vela-public">Vela · Revisión</h1>
+          <p className="text-sm text-vela-text-faint mt-1">Verificación de identidad pendiente</p>
         </div>
         <div className="flex gap-2">
           <button
             onClick={cargar}
-            className="text-xs font-semibold bg-vela-surface-2 border border-vela-line rounded-full px-4 py-2 text-vela-text-dim"
+            className="h-11 px-5 rounded-full bg-vela-surface-2 border border-vela-line text-sm font-bold text-vela-text flex items-center justify-center"
           >
             Actualizar
           </button>
           <button
             onClick={cerrarSesion}
-            className="text-xs font-semibold bg-vela-surface-2 border border-vela-line rounded-full px-4 py-2 text-vela-text-dim"
+            className="h-11 px-5 rounded-full bg-vela-surface-2 border border-vela-line text-sm font-bold text-vela-text flex items-center justify-center"
           >
             Cerrar sesión
           </button>
@@ -148,14 +201,20 @@ export default function RevisionAdmin() {
       </div>
 
       {aviso !== '' && (
-        <div className="mb-4 rounded-xl border border-vela-verified/40 bg-vela-verified-soft p-3 text-xs text-vela-text-dim flex justify-between gap-3">
-          <span>{aviso}</span>
-          <button onClick={() => setAviso('')} className="text-vela-text-faint">✕</button>
+        <div className="mb-4 rounded-2xl border border-vela-verified/40 bg-vela-verified-soft pl-4 pr-1 py-1 text-sm text-vela-text-dim flex items-center justify-between gap-3">
+          <span className="py-2">{aviso}</span>
+          <button
+            onClick={() => setAviso('')}
+            aria-label="Cerrar aviso"
+            className="w-11 h-11 flex-shrink-0 flex items-center justify-center text-vela-text-faint"
+          >
+            <IconoCerrar size={20} stroke={2.2} />
+          </button>
         </div>
       )}
 
       {error !== '' && (
-        <div className="mb-4 rounded-xl border border-vela-safety/40 bg-vela-safety-soft p-3 text-xs text-vela-safety">
+        <div className="mb-4 rounded-2xl border border-vela-safety/40 bg-vela-safety-soft p-4 text-sm text-vela-safety">
           {error}
         </div>
       )}
@@ -185,6 +244,7 @@ function TarjetaSolicitud({ s, onResuelto }: { s: Solicitud; onResuelto: (id: st
   const [errorLocal, setErrorLocal] = useState('');
 
   const comentarioValido = comentario.trim().length >= 10;
+  const diditEnCurso = !!s.didit && DIDIT_EN_CURSO.includes(s.didit.estado);
 
   function agregarMotivo(m: string) {
     setComentario((prev) => (prev.trim() === '' ? m : prev.includes(m) ? prev : `${prev.trim()} ${m}`));
@@ -224,72 +284,93 @@ function TarjetaSolicitud({ s, onResuelto }: { s: Solicitud; onResuelto: (id: st
   }
 
   return (
-    <div className="bg-vela-surface border border-vela-line border-l-2 border-l-vela-public rounded-xl p-4">
-      <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
+    <div className="bg-vela-surface border border-vela-line rounded-3xl p-5">
+      <div className="flex flex-wrap items-start justify-between gap-2 mb-4">
         <div className="min-w-0">
-          <p className="text-base font-extrabold text-vela-text italic">
+          <p className="text-xl font-extrabold text-vela-text italic">
             {s.nombre || s.alias}
             {s.edad !== null && <span className="not-italic font-bold text-vela-text-dim">, {s.edad}</span>}
           </p>
-          <p className="text-xs text-vela-text-faint">
+          <p className="text-sm text-vela-text-faint mt-0.5">
             {s.rol === 'proveedor' ? 'Quiere ser descubierta' : 'Quiere conocer'} · {s.ciudad || 'Sin ciudad'}
           </p>
         </div>
-        <p className="text-[11px] text-vela-text-faint">
+        <p className="text-xs text-vela-text-faint">
           Registro: {new Date(s.creado).toLocaleDateString('es-SV', { day: 'numeric', month: 'short', year: 'numeric' })}
         </p>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 text-xs mb-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 text-sm mb-4">
         <p className="py-1 text-vela-text-dim"><span className="text-vela-text-faint">Alias: </span>{s.alias || '—'}</p>
-        <p className="py-1 text-vela-text-dim"><span className="text-vela-text-faint">Correo: </span>{s.correo || '—'}</p>
+        <p className="py-1 text-vela-text-dim break-all"><span className="text-vela-text-faint">Correo: </span>{s.correo || '—'}</p>
         <p className="py-1 text-vela-text-dim"><span className="text-vela-text-faint">Teléfono: </span>{s.telefono || '—'}</p>
+        <p className="py-1 text-vela-text-dim"><span className="text-vela-text-faint">Es: </span>{etiquetaGenero(s.genero)}</p>
+        <p className="py-1 text-vela-text-dim"><span className="text-vela-text-faint">Quiere conocer: </span>{etiquetaBusca(s.buscaGeneros)}</p>
       </div>
 
+      {s.didit && (
+        <div className="rounded-2xl border border-vela-line bg-vela-surface-2 p-4 text-sm mb-4">
+          <p className="font-bold text-vela-text">
+            Verificación automática (Didit): <span className="text-vela-public">{etiquetaDidit(s.didit.estado)}</span>
+          </p>
+          {s.didit.motivos.length > 0 && (
+            <ul className="mt-2 list-disc pl-5 text-xs text-vela-text-dim leading-relaxed">
+              {s.didit.motivos.map((m, i) => <li key={i}>{m}</li>)}
+            </ul>
+          )}
+          <p className="text-[11px] text-vela-text-faint mt-2 break-all">
+            Sesión: {s.didit.sessionId}. Las imágenes del documento están en la consola de Didit (business.didit.me).
+          </p>
+          {diditEnCurso && (
+            <p className="text-xs text-vela-amber mt-2">La persona todavía no termina la verificación. Espera a que la complete.</p>
+          )}
+        </div>
+      )}
+
       {s.sinDocumentos ? (
-        <div className="rounded-xl border border-vela-amber/40 bg-vela-surface-2 p-3 text-xs text-vela-text-dim mb-4">
+        <div className="rounded-2xl border border-vela-amber/40 bg-vela-surface-2 p-4 text-sm text-vela-text-dim mb-4">
           Esta persona no tiene documentos guardados (se registró antes de que existiera la tabla de verificación).
           Puedes rechazarla con un comentario para que vuelva a enviarlos.
         </div>
-      ) : (
+      ) : (s.selfieUrl || s.documentoUrl) ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
           <Imagen titulo="Selfie con documento" url={s.selfieUrl} />
           <Imagen titulo="Documento de identidad" url={s.documentoUrl} />
         </div>
-      )}
+      ) : null}
 
-      {errorLocal !== '' && <p className="text-xs text-vela-safety mb-3">{errorLocal}</p>}
+      {errorLocal !== '' && <p className="text-sm text-vela-safety mb-3">{errorLocal}</p>}
 
       {!rechazando ? (
         <div className="flex gap-3">
           <button
             onClick={() => enviar('aprobar')}
-            disabled={procesando || s.sinDocumentos}
-            className="flex-1 py-3 rounded-full bg-vela-verified text-white text-sm font-bold disabled:opacity-50"
+            disabled={procesando || s.sinDocumentos || diditEnCurso}
+            className="flex-1 h-14 rounded-full bg-vela-verified text-white text-base font-bold flex items-center justify-center disabled:opacity-50"
           >
             {procesando ? 'Procesando...' : 'Aprobar'}
           </button>
           <button
             onClick={() => setRechazando(true)}
             disabled={procesando}
-            className="flex-1 py-3 rounded-full bg-vela-safety text-white text-sm font-bold disabled:opacity-50"
+            className="flex-1 h-14 rounded-full bg-vela-safety text-white text-base font-bold flex items-center justify-center disabled:opacity-50"
           >
             Rechazar
           </button>
         </div>
       ) : (
-        <div className="rounded-xl border border-vela-line bg-vela-surface-2 p-3.5">
-          <p className="text-xs font-bold text-vela-text mb-1">Comentario para la persona</p>
-          <p className="text-[11px] text-vela-text-faint mb-2">
+        <div className="rounded-2xl border border-vela-line bg-vela-surface-2 p-4">
+          <p className="text-sm font-bold text-vela-text mb-1">Comentario para la persona</p>
+          <p className="text-xs text-vela-text-faint mb-3">
             Se enviará por correo a {s.correo || 'la persona'}. Explica qué debe corregir.
           </p>
-          <div className="flex flex-wrap gap-1.5 mb-2">
+          <div className="flex flex-wrap gap-2 mb-3">
             {MOTIVOS_RAPIDOS.map((m) => (
               <button
                 key={m}
                 type="button"
                 onClick={() => agregarMotivo(m)}
-                className="text-[10px] bg-vela-surface border border-vela-line text-vela-text-dim rounded-full px-2.5 py-1"
+                className="text-xs bg-vela-surface border border-vela-line text-vela-text-dim rounded-full px-3.5 py-2.5 text-left"
               >
                 + {m}
               </button>
@@ -300,26 +381,26 @@ function TarjetaSolicitud({ s, onResuelto }: { s: Solicitud; onResuelto: (id: st
             onChange={(e) => setComentario(e.target.value.slice(0, 500))}
             rows={4}
             placeholder="Ej. La foto del documento sale borrosa, súbela de nuevo con buena luz."
-            className="w-full bg-vela-surface border border-vela-line rounded-xl px-3 py-2.5 text-sm text-vela-text outline-none focus:border-vela-public/60 resize-none"
+            className="w-full bg-vela-surface border border-vela-line rounded-2xl px-4 py-3 text-base text-vela-text outline-none focus:border-vela-public/60 resize-none"
           />
-          <div className="flex items-center justify-between mt-1 mb-3">
-            <span className="text-[10px] text-vela-text-faint">
+          <div className="flex items-center justify-between mt-1.5 mb-4">
+            <span className="text-xs text-vela-text-faint">
               {comentarioValido ? ' ' : 'Mínimo 10 caracteres'}
             </span>
-            <span className="text-[10px] text-vela-text-faint">{comentario.length}/500</span>
+            <span className="text-xs text-vela-text-faint">{comentario.length}/500</span>
           </div>
           <div className="flex gap-3">
             <button
               onClick={() => { setRechazando(false); setComentario(''); setErrorLocal(''); }}
               disabled={procesando}
-              className="flex-1 py-3 rounded-full bg-vela-surface border border-vela-line text-vela-text-faint text-sm font-semibold"
+              className="flex-1 h-14 rounded-full bg-vela-surface border border-vela-line text-vela-text-faint text-base font-bold flex items-center justify-center"
             >
               Cancelar
             </button>
             <button
               onClick={() => enviar('rechazar')}
               disabled={procesando || !comentarioValido}
-              className="flex-1 py-3 rounded-full bg-vela-safety text-white text-sm font-bold disabled:opacity-50"
+              className="flex-1 h-14 rounded-full bg-vela-safety text-white text-base font-bold flex items-center justify-center text-center leading-tight disabled:opacity-50"
             >
               {procesando ? 'Enviando...' : 'Rechazar y enviar correo'}
             </button>
@@ -333,14 +414,14 @@ function TarjetaSolicitud({ s, onResuelto }: { s: Solicitud; onResuelto: (id: st
 function Imagen({ titulo, url }: { titulo: string; url: string | null }) {
   return (
     <div>
-      <p className="text-[10px] text-vela-text-faint mb-1">{titulo}</p>
+      <p className="text-xs text-vela-text-faint mb-1.5">{titulo}</p>
       {url ? (
         <a href={url} target="_blank" rel="noreferrer">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={url} alt={titulo} className="w-full max-h-72 object-contain rounded-lg border border-vela-line bg-black/20" />
+          <img src={url} alt={titulo} className="w-full max-h-72 object-contain rounded-2xl border border-vela-line bg-black/20" />
         </a>
       ) : (
-        <div className="w-full h-40 rounded-lg border border-dashed border-vela-line flex items-center justify-center text-xs text-vela-text-faint">
+        <div className="w-full h-40 rounded-2xl border border-dashed border-vela-line flex items-center justify-center text-sm text-vela-text-faint">
           No disponible
         </div>
       )}

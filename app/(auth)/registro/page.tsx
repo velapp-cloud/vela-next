@@ -3,10 +3,14 @@
 /**
  * app/(auth)/registro/page.tsx
  *
- * Flujo (4 pasos): 1 qué buscas + términos (-> cómo funciona) -> 2 tu cuenta (crea la cuenta y envía
- * el código de 6 dígitos al correo; luego verifica el código + activa la ubicación) ->
- * 3 tu perfil (residencia, estatura, ocupación, idiomas, disponibilidad y fotos) ->
+ * Flujo (4 pasos): 1 qué buscas + términos (-> cómo funciona) -> 2 tu cuenta (incluye "eres" y a quién
+ * quieres conocer; crea la cuenta y envía el código de 6 dígitos al correo; luego verifica el código +
+ * activa la ubicación) -> 3 tu perfil (residencia, estatura, ocupación, idiomas, disponibilidad y fotos) ->
  * 4 preferencias (solo "ser descubierta") + verificación de identidad.
+ *
+ * Verificación de identidad: por defecto automática con Didit (escaneo del documento + selfie en vivo).
+ * Si falla o la persona lo prefiere, queda la verificación manual (selfie con documento + foto del
+ * documento) que revisa un administrador.
  *
  * La cuenta se crea al final del paso 2, pero la sesión solo existe cuando el correo se verifica
  * (requiere "Confirm email" activo en Supabase). Desde el paso 3 ya hay sesión y userId reales,
@@ -44,6 +48,7 @@ import { esCorreoValido, telefonoValidoPara } from '@/lib/utils/validaciones';
 type Rol = 'cliente' | 'proveedor';
 type Paso = 1 | 1.5 | 2 | 2.5 | 3 | 4;
 type EstadoUbicacion = 'idle' | 'pidiendo' | 'activa' | 'denegada' | 'error' | 'no-soportada';
+type ModoVerificacion = 'didit' | 'manual';
 
 const OCUPACIONES = [
   'Empresario/a', 'Profesional independiente', 'Empleado/a privado',
@@ -51,6 +56,18 @@ const OCUPACIONES = [
   'Área de salud', 'Docente', 'Comerciante', 'Sector tecnológico',
   'Gastronomía', 'Entretenimiento', 'Bienes raíces', 'Finanzas',
   'Deportista', 'Ama/o de casa', 'Jubilado/a', 'Prefiero no decir', 'Otro',
+];
+
+const OPCIONES_GENERO = [
+  { id: 'mujer', label: 'Mujer' },
+  { id: 'hombre', label: 'Hombre' },
+  { id: 'otro', label: 'Otro' },
+];
+// Lo que se elige en pantalla y los valores que se guardan en perfiles.busca_generos.
+const OPCIONES_BUSCA = [
+  { id: 'mujeres', label: 'Mujeres', valor: ['mujer'] },
+  { id: 'hombres', label: 'Hombres', valor: ['hombre'] },
+  { id: 'todos', label: 'Todos', valor: ['mujer', 'hombre', 'otro'] },
 ];
 
 const SIEMPRE_DISPONIBLE = 'Siempre disponible';
@@ -114,6 +131,8 @@ export default function Registro() {
   const [nombreLibre, setNombreLibre] = useState('');
   const [nombrePorPartes, setNombrePorPartes] = useState(false);
   const [fechaNacimiento, setFechaNacimiento] = useState('');
+  const [genero, setGenero] = useState('');
+  const [buscaClave, setBuscaClave] = useState('');
   const [correo, setCorreo] = useState('');
   const [paisTelefono, setPaisTelefono] = useState<Pais>(PAISES[0]);
   const [showPaisPicker, setShowPaisPicker] = useState(false);
@@ -229,6 +248,8 @@ export default function Registro() {
     primerNombre.trim().length >= 2 &&
     primerApellido.trim().length >= 2 &&
     edadValida &&
+    genero !== '' &&
+    buscaClave !== '' &&
     correoValido &&
     telefonoValido &&
     passwordValid &&
@@ -238,6 +259,8 @@ export default function Registro() {
     primerNombre.trim().length < 2 && 'primer nombre',
     primerApellido.trim().length < 2 && 'primer apellido',
     !edadValida && 'fecha de nacimiento (mayor de 18)',
+    genero === '' && 'quién eres',
+    buscaClave === '' && 'a quién quieres conocer',
     !correoValido && 'correo válido',
     !telefonoValido && 'teléfono válido',
     !passwordValid && 'contraseña segura',
@@ -281,9 +304,13 @@ export default function Registro() {
   const [documentoPreview, setDocumentoPreview] = useState<string | null>(null);
   const [subiendoVerificacion, setSubiendoVerificacion] = useState<'selfie' | 'documento' | null>(null);
   const [finalizando, setFinalizando] = useState(false);
-  // Evita duplicar la solicitud de verificación si hay que reintentar "Finalizar".
+  // Evita duplicar la solicitud de verificación manual si hay que reintentar "Finalizar".
   const [verifGuardada, setVerifGuardada] = useState(false);
-  const paso4Valido = !!selfieUrl && !!documentoUrl;
+  // Evita volver a guardar el perfil y las preferencias si solo falló el inicio de Didit.
+  const [perfilGuardado, setPerfilGuardado] = useState(false);
+  // La verificación automática (Didit) es la principal; la manual queda como respaldo.
+  const [modoManual, setModoManual] = useState(false);
+  const paso4ValidoManual = !!selfieUrl && !!documentoUrl;
   const faltanPaso4 = [
     !selfieUrl && 'selfie con tu documento',
     !documentoUrl && 'foto de tu documento',
@@ -457,6 +484,8 @@ export default function Registro() {
         setUserId(uid);
       }
 
+      const buscaGeneros = OPCIONES_BUSCA.find((o) => o.id === buscaClave)?.valor ?? null;
+
       // OJO: no se envía "alias". Lo genera la base de datos (INICIALES-0001) a partir del nombre y apellido.
       const { error: perfilError } = await supabase
         .from('perfiles')
@@ -469,6 +498,8 @@ export default function Registro() {
           correo: correo.trim(),
           telefono: `${paisTelefono.dial}${telefono}`,
           fecha_nacimiento: fechaNacimiento,
+          genero,
+          busca_generos: buscaGeneros,
           rol,
           avatar_color: avatarColor,
           plan: 'basico',
@@ -540,15 +571,20 @@ export default function Registro() {
     );
   }
 
-  async function handleFinalizarRegistro() {
+  /**
+   * Paso final. Guarda preferencias y perfil y luego:
+   *  - modo 'didit': crea la sesión y lleva a la persona a la verificación automática (vuelve a /pendiente).
+   *  - modo 'manual': guarda selfie y documento para revisión del administrador y va a /pendiente.
+   */
+  async function handleFinalizarRegistro(modo: ModoVerificacion) {
     if (!userId || finalizando) return;
     setFinalizando(true);
     setError('');
     const supabase = createClient();
 
     try {
-      // 1) Solicitud de verificación (lo más importante: sin esto el admin no puede revisar).
-      if (!verifGuardada) {
+      // 1) Verificación manual: la solicitud con los documentos (sin esto el admin no puede revisar).
+      if (modo === 'manual' && !verifGuardada) {
         const { error: verifError } = await supabase.from('verificaciones_identidad').insert({
           perfil_id: userId,
           selfie_url: selfieUrl,
@@ -569,62 +605,84 @@ export default function Registro() {
         setVerifGuardada(true);
       }
 
-      // 2) Preferencias (solo "quiero ser descubierta"). Se borran y reinsertan para poder reintentar sin duplicar.
-      if (rol === 'proveedor') {
-        const { error: delChipsError } = await supabase
-          .from('perfil_chips_preferencia')
-          .delete()
-          .eq('perfil_id', userId);
-
-        if (delChipsError) {
-          console.error('Error limpiando preferencias:', delChipsError);
-          setError('No se pudieron guardar tus preferencias. Intenta de nuevo.');
-          setFinalizando(false);
-          return;
-        }
-
-        if (chipsSel.length > 0) {
-          const { error: chipsError } = await supabase
+      if (!perfilGuardado) {
+        // 2) Preferencias (solo "quiero ser descubierta"). Se borran y reinsertan para poder reintentar sin duplicar.
+        if (rol === 'proveedor') {
+          const { error: delChipsError } = await supabase
             .from('perfil_chips_preferencia')
-            .insert(chipsSel.map((chip) => ({ perfil_id: userId, chip })));
+            .delete()
+            .eq('perfil_id', userId);
 
-          if (chipsError) {
-            console.error('Error guardando preferencias:', chipsError);
+          if (delChipsError) {
+            console.error('Error limpiando preferencias:', delChipsError);
             setError('No se pudieron guardar tus preferencias. Intenta de nuevo.');
             setFinalizando(false);
             return;
           }
+
+          if (chipsSel.length > 0) {
+            const { error: chipsError } = await supabase
+              .from('perfil_chips_preferencia')
+              .insert(chipsSel.map((chip) => ({ perfil_id: userId, chip })));
+
+            if (chipsError) {
+              console.error('Error guardando preferencias:', chipsError);
+              setError('No se pudieron guardar tus preferencias. Intenta de nuevo.');
+              setFinalizando(false);
+              return;
+            }
+          }
         }
+
+        // 3) Se marca el registro como completo.
+        const { error: updateError } = await supabase
+          .from('perfiles')
+          .update({
+            ciudad: ciudadFinal.trim(),
+            estatura: `${estatura}m`,
+            ocupacion,
+            idiomas: idiomas.trim(),
+            disponible: disponibilidad.join(', '),
+            fotos,
+            registro_completo: true,
+            ...(rol === 'proveedor' ? { regalo: regalo.trim() || null } : {}),
+          })
+          .eq('id', userId);
+
+        if (updateError) {
+          console.error('Error guardando datos de perfil:', {
+            message: updateError.message,
+            details: updateError.details,
+            hint: updateError.hint,
+            code: updateError.code,
+          });
+          setError('Hubo un problema guardando tus datos. Intenta de nuevo o contacta a soporte.');
+          setFinalizando(false);
+          return;
+        }
+        setPerfilGuardado(true);
       }
 
-      // 3) Al final se marca el registro como completo.
-      const { error: updateError } = await supabase
-        .from('perfiles')
-        .update({
-          ciudad: ciudadFinal.trim(),
-          estatura: `${estatura}m`,
-          ocupacion,
-          idiomas: idiomas.trim(),
-          disponible: disponibilidad.join(', '),
-          fotos,
-          registro_completo: true,
-          ...(rol === 'proveedor' ? { regalo: regalo.trim() || null } : {}),
-        })
-        .eq('id', userId);
-
-      if (updateError) {
-        console.error('Error guardando datos de perfil:', {
-          message: updateError.message,
-          details: updateError.details,
-          hint: updateError.hint,
-          code: updateError.code,
-        });
-        setError('Hubo un problema guardando tus datos. Intenta de nuevo o contacta a soporte.');
-        setFinalizando(false);
+      if (modo === 'manual') {
+        router.replace('/pendiente');
         return;
       }
 
-      router.replace('/pendiente');
+      // 4) Verificación automática: se crea la sesión y se envía a la persona a Didit.
+      const { data: sesionData } = await supabase.auth.getSession();
+      const accessToken = sesionData.session?.access_token;
+      const res = await fetch('/api/didit/crear-sesion', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken ?? ''}` },
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.url) {
+        setError(json?.error ?? 'No se pudo iniciar la verificación. Intenta de nuevo o usa la verificación manual.');
+        setFinalizando(false);
+        return;
+      }
+      // Sale de Vela hacia Didit; al terminar regresa a /pendiente.
+      window.location.href = json.url as string;
     } catch (err) {
       console.error('Excepción finalizando registro:', err);
       setError('No se pudo completar el registro. Intenta de nuevo.');
@@ -783,6 +841,28 @@ export default function Registro() {
           {fechaNacimiento && !edadValida && (
             <p className="text-xs text-vela-safety -mt-2">Debes ser mayor de 18 años para registrarte.</p>
           )}
+
+          <div>
+            <Etiqueta texto="Eres" requerido />
+            <div className="grid grid-cols-3 gap-2 mt-1.5">
+              {OPCIONES_GENERO.map((o) => (
+                <OpcionUnica key={o.id} texto={o.label} activo={genero === o.id} color={colorRol} onClick={() => setGenero(o.id)} />
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <Etiqueta texto="A quién quieres conocer" requerido />
+            <div className="grid grid-cols-3 gap-2 mt-1.5">
+              {OPCIONES_BUSCA.map((o) => (
+                <OpcionUnica key={o.id} texto={o.label} activo={buscaClave === o.id} color={colorRol} onClick={() => setBuscaClave(o.id)} />
+              ))}
+            </div>
+            <p className="text-[11px] text-vela-text-faint mt-1.5 leading-relaxed">
+              Solo verás perfiles de este grupo.
+            </p>
+          </div>
+
           <Campo label="Correo electrónico" requerido value={correo} onChange={(v) => setCorreo(v.replace(/\s/g, ''))} type="email" placeholder="tucorreo@ejemplo.com" autoComplete="email" />
           {correo.length > 0 && !correoValido && (
             <p className="text-xs text-vela-safety -mt-2">Escribe un correo válido, por ejemplo nombre@dominio.com.</p>
@@ -1268,40 +1348,83 @@ export default function Registro() {
             <div>
               <h2 className="text-lg font-bold text-vela-text">Verifica tu identidad</h2>
               <p className="text-sm text-vela-text-faint mt-1">
-                Obligatoria para poder aparecer en Vela. Un administrador la revisa manualmente.
-              </p>
-              <p className="text-[11px] text-vela-text-faint mt-1.5">
-                Formatos permitidos: {FORMATOS_TEXTO}. Puedes usar la cámara o la galería. Asegúrate de que se lea bien y tenga buena luz.
+                Obligatoria para poder aparecer en Vela. Es automática y toma unos minutos.
               </p>
             </div>
 
-            <SubidaArchivo
-              label="Selfie sosteniendo tu documento"
-              requerido
-              facing="user"
-              url={selfieUrl}
-              preview={selfiePreview}
-              subiendo={subiendoVerificacion === 'selfie'}
-              onChange={(e) => handleSubirVerificacion('selfie', e)}
-            />
-            <SubidaArchivo
-              label="Foto de tu documento de identidad"
-              requerido
-              facing="environment"
-              url={documentoUrl}
-              preview={documentoPreview}
-              subiendo={subiendoVerificacion === 'documento'}
-              onChange={(e) => handleSubirVerificacion('documento', e)}
-            />
+            {!modoManual ? (
+              <>
+                <div className="rounded-2xl border border-vela-line bg-vela-surface p-4 flex flex-col gap-3">
+                  <PasoVerificacion n={1} titulo="Escanea tu DUI" texto="Con la cámara de tu celular, con buena luz y sin reflejos." />
+                  <PasoVerificacion n={2} titulo="Selfie en vivo" texto="Una prueba rápida para confirmar que eres tú y que estás presente." />
+                  <PasoVerificacion n={3} titulo="Resultado al instante" texto="Si todo coincide, tu cuenta se aprueba sola." />
+                </div>
+                <p className="text-[11px] text-vela-text-faint leading-relaxed">
+                  La verificación la procesa Didit, un proveedor especializado. Al continuar sales de Vela unos
+                  minutos y vuelves automáticamente.
+                </p>
+                {error !== '' && <p className="text-sm text-vela-safety">{error}</p>}
+                <Pie>
+                  <BotonPrincipal disabled={finalizando} onClick={() => handleFinalizarRegistro('didit')}>
+                    {finalizando ? 'Preparando...' : 'Verificar mi identidad'}
+                  </BotonPrincipal>
+                  <button
+                    type="button"
+                    onClick={() => { setError(''); setModoManual(true); }}
+                    disabled={finalizando}
+                    className="w-full mt-3 text-xs text-vela-text-faint font-semibold underline"
+                  >
+                    Prefiero verificarme manualmente (la revisión tarda más)
+                  </button>
+                </Pie>
+              </>
+            ) : (
+              <>
+                <p className="text-[11px] text-vela-text-faint">
+                  Un administrador revisa tus fotos manualmente. Formatos permitidos: {FORMATOS_TEXTO}. Puedes usar la
+                  cámara o la galería. Asegúrate de que se lea bien y tenga buena luz.
+                </p>
+
+                <SubidaArchivo
+                  label="Selfie sosteniendo tu documento"
+                  requerido
+                  facing="user"
+                  url={selfieUrl}
+                  preview={selfiePreview}
+                  subiendo={subiendoVerificacion === 'selfie'}
+                  onChange={(e) => handleSubirVerificacion('selfie', e)}
+                />
+                <SubidaArchivo
+                  label="Foto de tu documento de identidad"
+                  requerido
+                  facing="environment"
+                  url={documentoUrl}
+                  preview={documentoPreview}
+                  subiendo={subiendoVerificacion === 'documento'}
+                  onChange={(e) => handleSubirVerificacion('documento', e)}
+                />
+
+                {error !== '' && <p className="text-sm text-vela-safety">{error}</p>}
+
+                <Pie ayuda={!paso4ValidoManual ? `Falta: ${faltanPaso4.join(', ')}.` : ''}>
+                  <BotonPrincipal
+                    disabled={!paso4ValidoManual || finalizando || subiendoVerificacion !== null}
+                    onClick={() => handleFinalizarRegistro('manual')}
+                  >
+                    {finalizando ? 'Guardando...' : 'Finalizar registro'}
+                  </BotonPrincipal>
+                  <button
+                    type="button"
+                    onClick={() => { setError(''); setModoManual(false); }}
+                    disabled={finalizando}
+                    className="w-full mt-3 text-xs text-vela-public font-semibold underline"
+                  >
+                    Volver a la verificación automática
+                  </button>
+                </Pie>
+              </>
+            )}
           </section>
-
-          {error !== '' && <p className="text-sm text-vela-safety">{error}</p>}
-
-          <Pie ayuda={!paso4Valido ? `Falta: ${faltanPaso4.join(', ')}.` : ''}>
-            <BotonPrincipal disabled={!paso4Valido || finalizando || subiendoVerificacion !== null} onClick={handleFinalizarRegistro}>
-              {finalizando ? 'Guardando...' : 'Finalizar registro'}
-            </BotonPrincipal>
-          </Pie>
         </div>
       )}
     </main>
@@ -1405,6 +1528,37 @@ function ChipToggle({ texto, activo, onClick }: { texto: string; activo: boolean
     >
       {texto}
     </button>
+  );
+}
+
+/** Botón grande para elegir una sola opción dentro de un grupo (género, a quién quiere conocer). */
+function OpcionUnica({ texto, activo, color, onClick }: { texto: string; activo: boolean; color: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={activo}
+      style={activo ? { borderColor: color, backgroundColor: color + '1F', color } : undefined}
+      className={`h-12 rounded-2xl border-2 text-sm font-bold transition ${
+        activo ? '' : 'bg-vela-surface-2 border-vela-line text-vela-text-faint'
+      }`}
+    >
+      {texto}
+    </button>
+  );
+}
+
+function PasoVerificacion({ n, titulo, texto }: { n: number; titulo: string; texto: string }) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="w-7 h-7 rounded-full bg-vela-public text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+        {n}
+      </span>
+      <div>
+        <p className="text-sm font-bold text-vela-text">{titulo}</p>
+        <p className="text-xs text-vela-text-faint leading-relaxed">{texto}</p>
+      </div>
+    </div>
   );
 }
 
